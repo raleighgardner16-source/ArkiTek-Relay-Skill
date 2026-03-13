@@ -62,7 +62,7 @@ export type ConnectionState =
   | "auth_failed"
   | "reconnecting";
 
-export const DEFAULT_BASE_URL = "https://arkitekai.com/api/v1/agents/relay";
+export const DEFAULT_BASE_URL = "https://api.arkitekai.com/api/v1/agents/relay";
 export const API_KEY_PATTERN = /^ak_[a-zA-Z0-9]{64}$/;
 export const MAX_RESPONSE_SIZE = 500 * 1024; // 500KB
 export const MAX_COUNCIL_PROMPT_SIZE = 100 * 1024; // 100KB

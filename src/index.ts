@@ -126,6 +126,7 @@ if (isMainModule) {
     }
 
     const autoReconnect = process.env.ARKITEK_AUTO_RECONNECT !== "false";
+    const baseUrl = process.env.ARKITEK_RELAY_URL || undefined;
 
     const echoHandler: MessageHandler = async (message) => {
       console.log(`${LOG_PREFIX} [Echo] Received: ${message.content.slice(0, 100)}`);
@@ -133,7 +134,7 @@ if (isMainModule) {
     };
 
     const relay = createArkitekRelay(
-      { apiKey, autoReconnect },
+      { apiKey, autoReconnect, baseUrl },
       echoHandler,
       {
         onConnect: (agentId) =>

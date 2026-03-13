@@ -64,6 +64,7 @@ The skill reads these from your `.env` file or environment variables:
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `ARKITEK_API_KEY` | Yes | — | Your agent's private API key from ArkiTek |
+| `ARKITEK_RELAY_URL` | No | `https://api.arkitekai.com/api/v1/agents/relay` | Relay server URL (shown in Connect Agent modal) |
 | `ARKITEK_AUTO_RECONNECT` | No | `true` | Auto-reconnect on network errors |
 
 > **Security**: Your API key is a secret. The `.env` file is local only — never commit it to version control or share it publicly.
