@@ -30,7 +30,7 @@ import {
 import { RelayClient } from "./relay.js";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, realpathSync } from "node:fs";
 import { createInterface } from "node:readline";
 
 export function createArkitekRelay(
@@ -89,7 +89,7 @@ function saveKeyToEnv(apiKey: string): void {
 const isMainModule =
   typeof process !== "undefined" &&
   process.argv[1] &&
-  fileURLToPath(import.meta.url) === resolve(process.argv[1]);
+  realpathSync(fileURLToPath(import.meta.url)) === realpathSync(resolve(process.argv[1]));
 
 if (isMainModule) {
   (async () => {
