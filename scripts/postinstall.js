@@ -13,5 +13,5 @@ console.log(`
 
     ${YELLOW}npx arkitek-relay-skill${RESET}
 
-  ${DIM}You'll be asked for your API key from https://arkitek.dev${RESET}
+  ${DIM}You'll be asked for your API key from https://arkitekai.com${RESET}
 `);

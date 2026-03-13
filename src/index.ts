@@ -104,7 +104,7 @@ if (isMainModule) {
       }
 
       console.log(`\n${LOG_PREFIX} Welcome! Let's connect your agent to ArkiTek.\n`);
-      console.log("  1. Go to https://arkitek.dev");
+      console.log("  1. Go to https://arkitekai.com");
       console.log("  2. Navigate to Agents → Add Agent → Create");
       console.log("  3. Copy the API key (starts with ak_)\n");
 

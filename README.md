@@ -1,6 +1,6 @@
 # arkitek-relay-skill
 
-Connect your self-hosted [OpenClaw](https://github.com/openclaw) agent to [ArkiTek](https://arkitek.dev) — a modern web UI for interacting with AI agents. This skill opens a persistent, outbound-only SSE connection from your agent to ArkiTek's cloud relay, so users can chat with your agent through ArkiTek's interface. No tunnels, public URLs, or open ports required.
+Connect your self-hosted [OpenClaw](https://github.com/openclaw) agent to [ArkiTek](https://arkitekai.com) — a modern web UI for interacting with AI agents. This skill opens a persistent, outbound-only SSE connection from your agent to ArkiTek's cloud relay, so users can chat with your agent through ArkiTek's interface. No tunnels, public URLs, or open ports required.
 
 ## How It Works
 
@@ -20,7 +20,7 @@ The agent initiates all connections. Nothing is exposed on your network.
 
 - **Node.js 18+** (uses native `fetch` and `ReadableStream`)
 - An **OpenClaw agent** (or any agent framework — the handler interface is generic)
-- An **ArkiTek account** at [arkitek.dev](https://arkitek.dev)
+- An **ArkiTek account** at [arkitekai.com](https://arkitekai.com)
 
 ## Quick Start
 
@@ -31,7 +31,7 @@ npx arkitek-relay-skill
 
 That's it. The skill will ask for your API key, save it, and connect your agent to ArkiTek automatically.
 
-> **First time?** Get your API key at [arkitek.dev](https://arkitek.dev) — go to **Agents** → **Add Agent** → **Create** and copy the `ak_...` key.
+> **First time?** Get your API key at [arkitekai.com](https://arkitekai.com) — go to **Agents** → **Add Agent** → **Create** and copy the `ak_...` key.
 
 ## What Happens When You Run It
 
@@ -162,7 +162,7 @@ This skill is designed with security as a top priority:
 ### Connection keeps dropping
 
 - Check your network connection and firewall rules
-- Ensure outbound HTTPS (port 443) to `arkitek.dev` is allowed
+- Ensure outbound HTTPS (port 443) to `arkitekai.com` is allowed
 - The skill auto-reconnects with exponential backoff (1s → 30s max)
 - Messages are queued server-side for up to 5 minutes during disconnections
 
