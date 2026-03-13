@@ -1,0 +1,55 @@
+{
+  "name": "arkitek-relay-skill",
+  "version": "1.0.1",
+  "description": "Connect your OpenClaw agent to ArkiTek via secure outbound SSE relay",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "type": "module",
+  "bin": {
+    "arkitek-relay-skill": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "clean": "rm -rf dist",
+    "postinstall": "node scripts/postinstall.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "openclaw",
+    "arkitek",
+    "agent",
+    "relay",
+    "sse",
+    "skill"
+  ],
+  "author": "",
+  "files": [
+    "dist",
+    "scripts/postinstall.js",
+    ".env.example",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/raleighgardner16-source/arkitek-relay-skill.git"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.3.0",
+    "vitest": "^1.2.0"
+  }
+}
