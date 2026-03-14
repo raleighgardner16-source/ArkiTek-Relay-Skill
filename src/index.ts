@@ -72,21 +72,28 @@ function promptForKey(): Promise<string> {
   });
 }
 
-function saveKeyToEnv(apiKey: string): void {
+function upsertEnvVar(key: string, value: string): void {
   const envPath = resolve(process.cwd(), ".env");
   if (existsSync(envPath)) {
     let content = readFileSync(envPath, "utf-8");
-    if (content.includes("ARKITEK_API_KEY=")) {
-      content = content.replace(/ARKITEK_API_KEY=.*/, `ARKITEK_API_KEY=${apiKey}`);
+    const pattern = new RegExp(`^${key}=.*$`, "m");
+    if (pattern.test(content)) {
+      content = content.replace(pattern, `${key}=${value}`);
     } else {
-      content = content.trimEnd() + `\nARKITEK_API_KEY=${apiKey}\n`;
+      content = content.trimEnd() + `\n${key}=${value}\n`;
     }
     writeFileSync(envPath, content);
   } else {
-    writeFileSync(
-      envPath,
-      `ARKITEK_API_KEY=${apiKey}\nARKITEK_AUTO_RECONNECT=true\n`
-    );
+    writeFileSync(envPath, `${key}=${value}\n`);
+  }
+}
+
+function saveKeyToEnv(apiKey: string): void {
+  upsertEnvVar("ARKITEK_API_KEY", apiKey);
+  const envPath = resolve(process.cwd(), ".env");
+  const content = readFileSync(envPath, "utf-8");
+  if (!content.includes("ARKITEK_AUTO_RECONNECT=")) {
+    upsertEnvVar("ARKITEK_AUTO_RECONNECT", "true");
   }
 }
 
@@ -192,8 +199,11 @@ if (isMainModule) {
     if (process.env.OPENCLAW_GATEWAY_URL || process.env.OPENCLAW_GATEWAY_TOKEN) {
       handler = createGatewayHandler(gatewayUrl, gatewayToken);
       mode = "gateway";
+      upsertEnvVar("OPENCLAW_GATEWAY_URL", gatewayUrl);
+      if (gatewayToken) upsertEnvVar("OPENCLAW_GATEWAY_TOKEN", gatewayToken);
       console.log(`${LOG_PREFIX} Mode: OpenClaw Gateway (${gatewayUrl})`);
     } else {
+      let detected = false;
       try {
         const probe = await fetch(`${gatewayUrl}/v1/chat/completions`, {
           method: "POST",
@@ -202,13 +212,19 @@ if (isMainModule) {
           signal: AbortSignal.timeout(2_000),
         });
         if (probe.status !== 0) {
-          handler = createGatewayHandler(gatewayUrl, gatewayToken);
-          mode = "gateway";
-          console.log(`${LOG_PREFIX} Mode: OpenClaw Gateway auto-detected (${gatewayUrl})`);
-        } else {
-          throw new Error("unreachable");
+          detected = true;
         }
       } catch {
+        // gateway not reachable
+      }
+
+      if (detected) {
+        handler = createGatewayHandler(gatewayUrl, gatewayToken);
+        mode = "gateway";
+        upsertEnvVar("OPENCLAW_GATEWAY_URL", gatewayUrl);
+        console.log(`${LOG_PREFIX} Mode: OpenClaw Gateway auto-detected (${gatewayUrl})`);
+        console.log(`${LOG_PREFIX} Saved OPENCLAW_GATEWAY_URL to .env for future runs.`);
+      } else {
         handler = async (message) => {
           console.log(`${LOG_PREFIX} [Echo] Received: ${message.content.slice(0, 100)}`);
           return `Echo: ${message.content}`;
