@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.11] - 2026-03-14
+
+### Fixed
+- Wizard now detects when a different API key in a `.env` file or environment variable would override the key the user just entered, and warns them with the exact file path to clean up
+- After saving config, the wizard sets `process.env.ARKITEK_API_KEY` to the new key so the current session always uses it (previously, a stale `.env` key would silently win)
+
 ## [1.0.10] - 2026-03-14
 
 ### Fixed

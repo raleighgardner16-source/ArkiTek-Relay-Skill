@@ -25,11 +25,42 @@ import {
   isPersistentInstall,
 } from "../service/index.js";
 import { validateApiKey, maskKey } from "../validation.js";
-import { existsSync } from "node:fs";
-import { dirname } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { homedir } from "node:os";
 import * as ui from "./ui.js";
 
 const TOTAL_STEPS = 9;
+
+function findEnvKeyLocations(): string[] {
+  const locations: string[] = [];
+  const candidates = [
+    join(process.cwd(), ".env"),
+    join(homedir(), ".env"),
+    join(homedir(), ".openclaw", "workspace", ".env"),
+  ];
+
+  for (const envPath of candidates) {
+    if (!existsSync(envPath)) continue;
+    try {
+      const content = readFileSync(envPath, "utf-8");
+      for (const line of content.split("\n")) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith("#")) continue;
+        let key = trimmed.split("=")[0]?.trim() ?? "";
+        if (key.startsWith("export ")) key = key.slice(7).trim();
+        if (key === "ARKITEK_API_KEY") {
+          locations.push(envPath);
+          break;
+        }
+      }
+    } catch {
+      // skip unreadable files
+    }
+  }
+
+  return locations;
+}
 
 async function promptForApiKey(): Promise<string> {
   console.log();
@@ -189,6 +220,42 @@ export async function runInstall(cli: CLIOptions): Promise<void> {
     apiKey = await promptForApiKey();
   }
 
+  const envKeyLocations = findEnvKeyLocations();
+  const envKeyValue = process.env.ARKITEK_API_KEY;
+  const envHasDifferentKey = envKeyValue && envKeyValue !== apiKey;
+
+  if (envHasDifferentKey && envKeyLocations.length > 0) {
+    console.log();
+    ui.warn(
+      `A different API key (${maskKey(envKeyValue)}) exists in:`,
+    );
+    for (const loc of envKeyLocations) {
+      ui.dimmed(`  ${loc}`);
+    }
+    ui.warn(
+      "That old key will override the one you just entered unless you remove it.",
+    );
+    ui.info(
+      "The relay will use your new key for this session, but you should",
+    );
+    ui.info(
+      "delete the old ARKITEK_API_KEY line from the file(s) above.",
+    );
+    console.log();
+  } else if (envHasDifferentKey) {
+    console.log();
+    ui.warn(
+      `A different API key (${maskKey(envKeyValue)}) is set in the ARKITEK_API_KEY environment variable.`,
+    );
+    ui.info(
+      "The relay will use your new key for this session, but you should",
+    );
+    ui.info(
+      "update or unset that env var to avoid conflicts on future runs.",
+    );
+    console.log();
+  }
+
   // ── Step 5: Test Gateway ─────────────────────────────────────────
 
   ui.step(5, TOTAL_STEPS, "Testing gateway connection");
@@ -301,6 +368,8 @@ export async function runInstall(cli: CLIOptions): Promise<void> {
     installedAt: existing?.installedAt || now,
     lastUpdated: now,
   });
+
+  process.env.ARKITEK_API_KEY = apiKey;
 
   ui.success(`Configuration saved to ${getConfigDir()}/config.json`);
 
