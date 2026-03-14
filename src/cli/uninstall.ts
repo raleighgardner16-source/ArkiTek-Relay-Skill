@@ -5,6 +5,7 @@ import {
   getServiceStatus,
   uninstallService,
 } from "../service/index.js";
+import { findEnvKeyLocations, removeApiKeyFromEnvFile } from "./env-cleanup.js";
 import * as ui from "./ui.js";
 
 export async function runUninstall(cli: CLIOptions): Promise<void> {
@@ -12,10 +13,11 @@ export async function runUninstall(cli: CLIOptions): Promise<void> {
 
   const configDir = getConfigDir();
   const service = await getServiceStatus();
-  const hasAnything = existsSync(configDir) || service.installed;
+  const envKeyLocations = findEnvKeyLocations();
+  const hasAnything = existsSync(configDir) || service.installed || envKeyLocations.length > 0;
 
   if (!hasAnything) {
-    ui.info("Nothing to uninstall. No config or service found.");
+    ui.info("Nothing to uninstall. No config, service, or API keys found.");
     return;
   }
 
@@ -28,11 +30,17 @@ export async function runUninstall(cli: CLIOptions): Promise<void> {
   if (existsSync(configDir)) {
     ui.info(`Config directory: ${configDir}`);
   }
+  if (envKeyLocations.length > 0) {
+    ui.info("ARKITEK_API_KEY found in .env file(s):");
+    for (const loc of envKeyLocations) {
+      ui.dimmed(`  ${loc}`);
+    }
+  }
 
   let shouldProceed = cli.yes;
   if (!shouldProceed && process.stdin.isTTY) {
     console.log();
-    ui.warn("This will remove the system service and all relay configuration.");
+    ui.warn("This will remove the system service, all relay configuration, and API keys from .env files.");
     shouldProceed = await ui.confirm("Continue?");
   }
 
@@ -63,6 +71,16 @@ export async function runUninstall(cli: CLIOptions): Promise<void> {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       ui.error(`Failed to remove config directory: ${msg}`);
+    }
+  }
+
+  // 3. Remove ARKITEK_API_KEY from .env files
+  for (const loc of envKeyLocations) {
+    if (removeApiKeyFromEnvFile(loc)) {
+      ui.success(`Removed ARKITEK_API_KEY from ${loc}`);
+    } else {
+      ui.error(`Could not update ${loc}`);
+      ui.dimmed(`  Manually remove the ARKITEK_API_KEY line from that file.`);
     }
   }
 

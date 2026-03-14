@@ -25,69 +25,12 @@ import {
   isPersistentInstall,
 } from "../service/index.js";
 import { validateApiKey, maskKey } from "../validation.js";
-import { existsSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { homedir } from "node:os";
+import { existsSync } from "node:fs";
+import { dirname } from "node:path";
+import { findEnvKeyLocations, removeApiKeyFromEnvFile } from "./env-cleanup.js";
 import * as ui from "./ui.js";
 
 const TOTAL_STEPS = 9;
-
-function findEnvKeyLocations(): string[] {
-  const locations: string[] = [];
-  const candidates = [
-    join(process.cwd(), ".env"),
-    join(homedir(), ".env"),
-    join(homedir(), ".openclaw", "workspace", ".env"),
-  ];
-
-  for (const envPath of candidates) {
-    if (!existsSync(envPath)) continue;
-    try {
-      const content = readFileSync(envPath, "utf-8");
-      for (const line of content.split("\n")) {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith("#")) continue;
-        let key = trimmed.split("=")[0]?.trim() ?? "";
-        if (key.startsWith("export ")) key = key.slice(7).trim();
-        if (key === "ARKITEK_API_KEY") {
-          locations.push(envPath);
-          break;
-        }
-      }
-    } catch {
-      // skip unreadable files
-    }
-  }
-
-  return locations;
-}
-
-function removeApiKeyFromEnvFile(envPath: string): boolean {
-  try {
-    const content = readFileSync(envPath, "utf-8");
-    const lines = content.split("\n");
-    const filtered = lines.filter((line) => {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith("#")) return true;
-      let key = trimmed.split("=")[0]?.trim() ?? "";
-      if (key.startsWith("export ")) key = key.slice(7).trim();
-      return key !== "ARKITEK_API_KEY";
-    });
-
-    const newContent = filtered.join("\n");
-    const remaining = filtered.filter((l) => l.trim() && !l.trim().startsWith("#"));
-
-    if (remaining.length === 0) {
-      unlinkSync(envPath);
-    } else {
-      writeFileSync(envPath, newContent, { mode: 0o600 });
-    }
-
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 async function promptForApiKey(): Promise<string> {
   console.log();
