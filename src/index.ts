@@ -97,23 +97,31 @@ function saveKeyToEnv(apiKey: string): void {
   }
 }
 
-function createGatewayHandler(gatewayUrl: string, gatewayToken?: string): MessageHandler {
-  const completionsUrl = `${gatewayUrl.replace(/\/+$/, "")}/v1/chat/completions`;
+function createGatewayHandler(
+  gatewayUrl: string,
+  gatewayToken?: string,
+  agentId = "main"
+): MessageHandler {
+  const responsesUrl = `${gatewayUrl.replace(/\/+$/, "")}/v1/responses`;
 
   return async (message: IncomingMessage): Promise<string> => {
     console.log(`${LOG_PREFIX} [Gateway] Forwarding message ${message.messageId} to OpenClaw...`);
 
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      "x-openclaw-agent-id": agentId,
+    };
     if (gatewayToken) {
       headers["Authorization"] = `Bearer ${gatewayToken}`;
     }
 
     const body = JSON.stringify({
-      messages: [{ role: "user", content: message.content }],
+      model: "openclaw",
+      input: message.content,
     });
 
     try {
-      const resp = await fetch(completionsUrl, {
+      const resp = await fetch(responsesUrl, {
         method: "POST",
         headers,
         body,
@@ -129,10 +137,13 @@ function createGatewayHandler(gatewayUrl: string, gatewayToken?: string): Messag
       }
 
       const data = (await resp.json()) as {
-        choices?: { message?: { content?: string } }[];
+        output?: { type?: string; content?: { type?: string; text?: string }[] }[];
       };
 
-      const reply = data.choices?.[0]?.message?.content;
+      const outputItem = data.output?.find((item) => item.type === "message");
+      const textPart = outputItem?.content?.find((part) => part.type === "output_text");
+      const reply = textPart?.text;
+
       if (!reply) {
         console.error(`${LOG_PREFIX} [Gateway] Unexpected response shape:`, JSON.stringify(data).slice(0, 300));
         return "[Error] Agent returned an empty response.";
@@ -192,23 +203,24 @@ if (isMainModule) {
 
     const gatewayUrl = process.env.OPENCLAW_GATEWAY_URL || DEFAULT_GATEWAY_URL;
     const gatewayToken = process.env.OPENCLAW_GATEWAY_TOKEN || undefined;
+    const agentId = process.env.OPENCLAW_AGENT_ID || "main";
 
     let handler: MessageHandler;
     let mode: string;
 
     if (process.env.OPENCLAW_GATEWAY_URL || process.env.OPENCLAW_GATEWAY_TOKEN) {
-      handler = createGatewayHandler(gatewayUrl, gatewayToken);
+      handler = createGatewayHandler(gatewayUrl, gatewayToken, agentId);
       mode = "gateway";
       upsertEnvVar("OPENCLAW_GATEWAY_URL", gatewayUrl);
       if (gatewayToken) upsertEnvVar("OPENCLAW_GATEWAY_TOKEN", gatewayToken);
-      console.log(`${LOG_PREFIX} Mode: OpenClaw Gateway (${gatewayUrl})`);
+      console.log(`${LOG_PREFIX} Mode: OpenClaw Gateway (${gatewayUrl}, agent: ${agentId})`);
     } else {
       let detected = false;
       try {
-        const probe = await fetch(`${gatewayUrl}/v1/chat/completions`, {
+        const probe = await fetch(`${gatewayUrl}/v1/responses`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ messages: [] }),
+          headers: { "Content-Type": "application/json", "x-openclaw-agent-id": agentId },
+          body: JSON.stringify({ model: "openclaw", input: "" }),
           signal: AbortSignal.timeout(2_000),
         });
         if (probe.status !== 0) {
@@ -219,10 +231,10 @@ if (isMainModule) {
       }
 
       if (detected) {
-        handler = createGatewayHandler(gatewayUrl, gatewayToken);
+        handler = createGatewayHandler(gatewayUrl, gatewayToken, agentId);
         mode = "gateway";
         upsertEnvVar("OPENCLAW_GATEWAY_URL", gatewayUrl);
-        console.log(`${LOG_PREFIX} Mode: OpenClaw Gateway auto-detected (${gatewayUrl})`);
+        console.log(`${LOG_PREFIX} Mode: OpenClaw Gateway auto-detected (${gatewayUrl}, agent: ${agentId})`);
         console.log(`${LOG_PREFIX} Saved OPENCLAW_GATEWAY_URL to .env for future runs.`);
       } else {
         handler = async (message) => {
