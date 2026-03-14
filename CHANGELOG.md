@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.12] - 2026-03-14
+
+### Improved
+- Wizard now offers to automatically remove old API keys from `.env` files instead of just warning about them
+- If user declines, shows clear instructions for manual removal
+- Env var conflict message now includes `unset ARKITEK_API_KEY` command
+
 ## [1.0.11] - 2026-03-14
 
 ### Fixed

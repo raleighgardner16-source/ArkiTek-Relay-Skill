@@ -25,7 +25,7 @@ import {
   isPersistentInstall,
 } from "../service/index.js";
 import { validateApiKey, maskKey } from "../validation.js";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import * as ui from "./ui.js";
@@ -60,6 +60,33 @@ function findEnvKeyLocations(): string[] {
   }
 
   return locations;
+}
+
+function removeApiKeyFromEnvFile(envPath: string): boolean {
+  try {
+    const content = readFileSync(envPath, "utf-8");
+    const lines = content.split("\n");
+    const filtered = lines.filter((line) => {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) return true;
+      let key = trimmed.split("=")[0]?.trim() ?? "";
+      if (key.startsWith("export ")) key = key.slice(7).trim();
+      return key !== "ARKITEK_API_KEY";
+    });
+
+    const newContent = filtered.join("\n");
+    const remaining = filtered.filter((l) => l.trim() && !l.trim().startsWith("#"));
+
+    if (remaining.length === 0) {
+      unlinkSync(envPath);
+    } else {
+      writeFileSync(envPath, newContent, { mode: 0o600 });
+    }
+
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function promptForApiKey(): Promise<string> {
@@ -235,12 +262,37 @@ export async function runInstall(cli: CLIOptions): Promise<void> {
     ui.warn(
       "That old key will override the one you just entered unless you remove it.",
     );
-    ui.info(
-      "The relay will use your new key for this session, but you should",
-    );
-    ui.info(
-      "delete the old ARKITEK_API_KEY line from the file(s) above.",
-    );
+
+    let shouldRemove = cli.yes;
+    if (!shouldRemove && process.stdin.isTTY) {
+      shouldRemove = await ui.confirm(
+        "Remove the old API key from those file(s)?",
+        true,
+      );
+    }
+
+    if (shouldRemove) {
+      for (const loc of envKeyLocations) {
+        if (removeApiKeyFromEnvFile(loc)) {
+          ui.success(`Removed old API key from ${loc}`);
+        } else {
+          ui.error(`Could not update ${loc}`);
+          ui.dimmed(
+            `  Manually remove the ARKITEK_API_KEY line from that file.`,
+          );
+        }
+      }
+    } else {
+      ui.info(
+        "The relay will use your new key for this session, but on future",
+      );
+      ui.info(
+        "runs the old key in those files will take priority.",
+      );
+      ui.dimmed(
+        "Remove the ARKITEK_API_KEY line from the file(s) above to fix permanently.",
+      );
+    }
     console.log();
   } else if (envHasDifferentKey) {
     console.log();
@@ -252,6 +304,9 @@ export async function runInstall(cli: CLIOptions): Promise<void> {
     );
     ui.info(
       "update or unset that env var to avoid conflicts on future runs.",
+    );
+    ui.dimmed(
+      "  Run: unset ARKITEK_API_KEY",
     );
     console.log();
   }
