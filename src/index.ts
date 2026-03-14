@@ -258,7 +258,63 @@ async function startRelayWithConfig(config: ResolvedConfig): Promise<void> {
   );
 
   console.log(`${LOG_PREFIX} Connecting to ArkiTek...`);
-  await relay.connect();
+
+  try {
+    await relay.connect();
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const isAuthError = msg.includes("401") || msg.includes("403") || msg.includes("invalid or revoked");
+
+    if (isAuthError && process.stdin.isTTY) {
+      console.log();
+      console.log(
+        `${LOG_PREFIX} Your API key was rejected by ArkiTek.`,
+      );
+      console.log(
+        `${LOG_PREFIX} This usually means the key is expired, revoked, or from a different agent.`,
+      );
+      console.log();
+      console.log(
+        `${LOG_PREFIX} To fix this, run the setup wizard to enter a new key:`,
+      );
+      console.log(
+        `${LOG_PREFIX}   npx arkitek-relay-skill --install`,
+      );
+      console.log();
+      console.log(
+        `${LOG_PREFIX} Or pass a key directly:`,
+      );
+      console.log(
+        `${LOG_PREFIX}   npx arkitek-relay-skill --api-key <your_new_key>`,
+      );
+      console.log();
+
+      if (config.source.arkitekApiKey !== "cli") {
+        console.log(
+          `${LOG_PREFIX} The rejected key came from: ${config.source.arkitekApiKey}`,
+        );
+        if (config.source.arkitekApiKey === "env") {
+          console.log(
+            `${LOG_PREFIX} Check your ARKITEK_API_KEY environment variable or .env files.`,
+          );
+        } else if (config.source.arkitekApiKey === "openclaw") {
+          console.log(
+            `${LOG_PREFIX} Check your OpenClaw config (~/.openclaw/openclaw.json).`,
+          );
+        } else if (config.source.arkitekApiKey === "persisted") {
+          console.log(
+            `${LOG_PREFIX} Run --install to update the saved key in ~/.arkitek-relay/config.json.`,
+          );
+        }
+        console.log();
+      }
+
+      process.exit(1);
+    }
+
+    throw err;
+  }
+
   console.log(
     `${LOG_PREFIX} Ready. Send a message from the ArkiTek UI to test.`,
   );
@@ -310,7 +366,14 @@ if (isMainModule) {
       }
     }
   })().catch((err: unknown) => {
-    console.error(`${LOG_PREFIX} Fatal:`, err);
+    const msg = err instanceof Error ? err.message : String(err);
+    const isAuthError = msg.includes("401") || msg.includes("403") || msg.includes("invalid or revoked");
+
+    if (isAuthError) {
+      console.error(`${LOG_PREFIX} ${msg}`);
+    } else {
+      console.error(`${LOG_PREFIX} Fatal:`, err);
+    }
     process.exit(1);
   });
 }

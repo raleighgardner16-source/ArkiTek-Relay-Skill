@@ -24,12 +24,40 @@ import {
   getServiceStatus,
   isPersistentInstall,
 } from "../service/index.js";
-import { validateApiKey } from "../validation.js";
+import { validateApiKey, maskKey } from "../validation.js";
 import { existsSync } from "node:fs";
 import { dirname } from "node:path";
 import * as ui from "./ui.js";
 
 const TOTAL_STEPS = 9;
+
+async function promptForApiKey(): Promise<string> {
+  console.log();
+  ui.info("Get your API key from https://arkitekai.com");
+  ui.dimmed(
+    "Go to Agents \u2192 Add Agent \u2192 Create, then copy the ak_... key",
+  );
+  console.log();
+
+  const apiKey = await ui.prompt("Paste your API key: ");
+
+  if (!apiKey) {
+    ui.error("No key provided. Exiting.");
+    process.exit(1);
+  }
+
+  try {
+    validateApiKey(apiKey);
+    ui.success("API key format valid");
+  } catch {
+    ui.error(
+      "Invalid API key format. Keys start with ak_ and are 67 characters.",
+    );
+    process.exit(1);
+  }
+
+  return apiKey;
+}
 
 export async function runInstall(cli: CLIOptions): Promise<void> {
   ui.heading("ArkiTek Relay \u2014 Setup");
@@ -143,7 +171,14 @@ export async function runInstall(cli: CLIOptions): Promise<void> {
     readPersistedConfig()?.arkitekApiKey;
 
   if (apiKey && API_KEY_PATTERN.test(apiKey)) {
-    ui.success("API key found (previously configured)");
+    ui.success(`API key found: ${maskKey(apiKey)}`);
+
+    if (process.stdin.isTTY) {
+      const shouldReplace = await ui.confirm("Enter a different API key?", false);
+      if (shouldReplace) {
+        apiKey = await promptForApiKey();
+      }
+    }
   } else {
     if (!process.stdin.isTTY) {
       ui.error("No API key found and stdin is not interactive.");
@@ -151,29 +186,7 @@ export async function runInstall(cli: CLIOptions): Promise<void> {
       process.exit(1);
     }
 
-    console.log();
-    ui.info("Get your API key from https://arkitekai.com");
-    ui.dimmed(
-      "Go to Agents \u2192 Add Agent \u2192 Create, then copy the ak_... key",
-    );
-    console.log();
-
-    apiKey = await ui.prompt("Paste your API key: ");
-
-    if (!apiKey) {
-      ui.error("No key provided. Exiting.");
-      process.exit(1);
-    }
-
-    try {
-      validateApiKey(apiKey);
-      ui.success("API key format valid");
-    } catch {
-      ui.error(
-        "Invalid API key format. Keys start with ak_ and are 67 characters.",
-      );
-      process.exit(1);
-    }
+    apiKey = await promptForApiKey();
   }
 
   // ── Step 5: Test Gateway ─────────────────────────────────────────

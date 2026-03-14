@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.10] - 2026-03-14
+
+### Fixed
+- Auth failure (401/403) no longer crashes with a raw stack trace — shows a clear message with the source of the rejected key and instructions to fix it
+- Fatal error handler suppresses stack trace for auth errors, only shows the actionable message
+
 ## [1.0.9] - 2026-03-14
 
 ### Added
