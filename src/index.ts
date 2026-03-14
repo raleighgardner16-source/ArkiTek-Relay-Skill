@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+// ── Library exports ────────────────────────────────────────────────
+
 export {
   type ArkitekConfig,
   type ArkitekRelayEvents,
@@ -13,99 +15,87 @@ export {
   type CouncilRequest,
   type CouncilResponse,
   type CouncilModelResponse,
+  type ResolvedConfig,
+  type OpenClawDetectedConfig,
+  type CLIOptions,
 } from "./types.js";
 
 export { RelayClient } from "./relay.js";
 export { maskKey, validateApiKey, checkTlsSafety, warnIfNotHttps } from "./validation.js";
 export { queryCouncil } from "./council.js";
+export { resolveConfig, rotateLogs } from "./config/resolver.js";
+export {
+  detectOpenClaw,
+  findInstalledSkill,
+  installSkillFile,
+  getDefaultSkillsDir,
+} from "./config/openclaw.js";
+
+// ── Internal imports ───────────────────────────────────────────────
 
 import {
-  type ArkitekConfig,
   type ArkitekRelayEvents,
   type IncomingMessage,
   type MessageHandler,
-  type ConnectionState,
+  type CLIOptions,
+  type ResolvedConfig,
   LOG_PREFIX,
-  API_KEY_PATTERN,
 } from "./types.js";
 import { RelayClient } from "./relay.js";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
-import { readFileSync, writeFileSync, existsSync, realpathSync } from "node:fs";
-import { createInterface } from "node:readline";
+import { realpathSync } from "node:fs";
+
+import { parseArgs, printHelp } from "./cli/parse.js";
+import { runInstall } from "./cli/install.js";
+import { runDoctor } from "./cli/doctor.js";
+import { runStatus } from "./cli/status.js";
+import { runLogs } from "./cli/logs.js";
+import { runUninstall } from "./cli/uninstall.js";
+import { runInitSkill } from "./cli/init-skill.js";
+import { resolveConfig, isFirstRun, rotateLogs } from "./config/resolver.js";
+import { testGatewayReachable } from "./config/openclaw.js";
+
+// ── Public API ─────────────────────────────────────────────────────
 
 const GATEWAY_TIMEOUT_MS = 120_000;
-const DEFAULT_GATEWAY_URL = "http://localhost:18789";
 
 export function createArkitekRelay(
-  config: ArkitekConfig,
+  config: { apiKey: string; autoReconnect?: boolean; baseUrl?: string },
   handler: MessageHandler,
-  events?: ArkitekRelayEvents
+  events?: ArkitekRelayEvents,
 ): RelayClient {
   return new RelayClient(config, handler, events);
 }
 
-function loadEnvFile(): void {
-  const envPath = resolve(process.cwd(), ".env");
-  if (!existsSync(envPath)) return;
-  const content = readFileSync(envPath, "utf-8");
-  for (const line of content.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    const eqIdx = trimmed.indexOf("=");
-    if (eqIdx === -1) continue;
-    const key = trimmed.slice(0, eqIdx).trim();
-    const value = trimmed.slice(eqIdx + 1).trim();
-    if (!process.env[key]) {
-      process.env[key] = value;
+// ── Gateway handler ────────────────────────────────────────────────
+
+function validateGatewayUrl(url: string): void {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      throw new Error(`Unsupported protocol "${parsed.protocol}" — only http:// and https:// are allowed`);
     }
-  }
-}
-
-function promptForKey(): Promise<string> {
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  return new Promise((res) => {
-    rl.question("  Paste your API key here: ", (answer) => {
-      rl.close();
-      res(answer.trim());
-    });
-  });
-}
-
-function upsertEnvVar(key: string, value: string): void {
-  const envPath = resolve(process.cwd(), ".env");
-  if (existsSync(envPath)) {
-    let content = readFileSync(envPath, "utf-8");
-    const pattern = new RegExp(`^${key}=.*$`, "m");
-    if (pattern.test(content)) {
-      content = content.replace(pattern, `${key}=${value}`);
-    } else {
-      content = content.trimEnd() + `\n${key}=${value}\n`;
+  } catch (err) {
+    if (err instanceof TypeError) {
+      throw new Error(`Invalid gateway URL "${url}": not a valid URL`);
     }
-    writeFileSync(envPath, content);
-  } else {
-    writeFileSync(envPath, `${key}=${value}\n`);
-  }
-}
-
-function saveKeyToEnv(apiKey: string): void {
-  upsertEnvVar("ARKITEK_API_KEY", apiKey);
-  const envPath = resolve(process.cwd(), ".env");
-  const content = readFileSync(envPath, "utf-8");
-  if (!content.includes("ARKITEK_AUTO_RECONNECT=")) {
-    upsertEnvVar("ARKITEK_AUTO_RECONNECT", "true");
+    throw err;
   }
 }
 
 function createGatewayHandler(
   gatewayUrl: string,
   gatewayToken?: string,
-  agentId = "main"
+  agentId = "main",
 ): MessageHandler {
+  validateGatewayUrl(gatewayUrl);
   const responsesUrl = `${gatewayUrl.replace(/\/+$/, "")}/v1/responses`;
 
   return async (message: IncomingMessage): Promise<string> => {
-    console.log(`${LOG_PREFIX} [Gateway] Forwarding message ${message.messageId} to OpenClaw...`);
+    console.log(
+      `${LOG_PREFIX} [Gateway] Forwarding message ${message.messageId} to OpenClaw...`,
+    );
 
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
@@ -131,142 +121,194 @@ function createGatewayHandler(
       if (!resp.ok) {
         const errBody = await resp.text().catch(() => "");
         console.error(
-          `${LOG_PREFIX} [Gateway] OpenClaw returned HTTP ${resp.status}: ${errBody.slice(0, 200)}`
+          `${LOG_PREFIX} [Gateway] OpenClaw returned HTTP ${resp.status}: ${errBody.slice(0, 200)}`,
         );
+        if (resp.status === 405) {
+          return (
+            `[Error] Agent gateway returned HTTP 405 (Method Not Allowed). ` +
+            `The /v1/responses endpoint is likely disabled. ` +
+            `Fix: openclaw gateway config.patch --set gateway.http.endpoints.responses.enabled=true`
+          );
+        }
         return `[Error] Agent gateway returned HTTP ${resp.status}. Check your OPENCLAW_GATEWAY_URL and OPENCLAW_GATEWAY_TOKEN.`;
       }
 
       const data = (await resp.json()) as {
-        output?: { type?: string; content?: { type?: string; text?: string }[] }[];
+        output?: {
+          type?: string;
+          content?: { type?: string; text?: string }[];
+        }[];
       };
 
-      const outputItem = data.output?.find((item) => item.type === "message");
-      const textPart = outputItem?.content?.find((part) => part.type === "output_text");
+      const outputItem = data.output?.find(
+        (item) => item.type === "message",
+      );
+      const textPart = outputItem?.content?.find(
+        (part) => part.type === "output_text",
+      );
       const reply = textPart?.text;
 
       if (!reply) {
-        console.error(`${LOG_PREFIX} [Gateway] Unexpected response shape:`, JSON.stringify(data).slice(0, 300));
+        console.error(
+          `${LOG_PREFIX} [Gateway] Unexpected response shape:`,
+          JSON.stringify(data).slice(0, 300),
+        );
         return "[Error] Agent returned an empty response.";
       }
 
-      console.log(`${LOG_PREFIX} [Gateway] Got response (${reply.length} chars) for message ${message.messageId}`);
+      console.log(
+        `${LOG_PREFIX} [Gateway] Got response (${reply.length} chars) for message ${message.messageId}`,
+      );
       return reply;
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.error(`${LOG_PREFIX} [Gateway] Failed to reach OpenClaw: ${msg}`);
+      console.error(
+        `${LOG_PREFIX} [Gateway] Failed to reach OpenClaw: ${msg}`,
+      );
       return `[Error] Could not reach the agent gateway at ${gatewayUrl}. Is your OpenClaw agent running?`;
     }
   };
 }
 
+// ── Relay startup ──────────────────────────────────────────────────
+
+async function startRelay(cli: CLIOptions, installedAlready = false): Promise<void> {
+  rotateLogs();
+  let config = resolveConfig(cli);
+
+  if (!config) {
+    if (!installedAlready && process.stdin.isTTY) {
+      console.log(
+        `${LOG_PREFIX} No configuration found. Running guided setup...\n`,
+      );
+      await runInstall(cli);
+      config = resolveConfig(cli);
+    }
+    if (!config) {
+      console.error(
+        `${LOG_PREFIX} ARKITEK_API_KEY not found. Run with --install or set the environment variable.`,
+      );
+      process.exit(1);
+    }
+  }
+
+  await startRelayWithConfig(config);
+}
+
+async function startRelayWithConfig(config: ResolvedConfig): Promise<void> {
+  let handler: MessageHandler;
+  let mode: string;
+
+  const reachable = await testGatewayReachable(config.gatewayUrl);
+
+  if (reachable) {
+    handler = createGatewayHandler(
+      config.gatewayUrl,
+      config.gatewayToken,
+      config.agentId,
+    );
+    mode = "gateway";
+    console.log(
+      `${LOG_PREFIX} Mode: OpenClaw Gateway (${config.gatewayUrl}, agent: ${config.agentId})`,
+    );
+    if (config.source.gatewayUrl !== "default") {
+      console.log(
+        `${LOG_PREFIX} Gateway URL source: ${config.source.gatewayUrl}${config.source.gatewayToken ? `, token from ${config.source.gatewayToken}` : ""}`,
+      );
+    }
+  } else {
+    handler = async (message) => {
+      console.log(
+        `${LOG_PREFIX} [Echo] Received: ${message.content.slice(0, 100)}`,
+      );
+      return `Echo: ${message.content}`;
+    };
+    mode = "echo";
+    console.log(
+      `${LOG_PREFIX} Mode: Echo (gateway at ${config.gatewayUrl} not reachable)`,
+    );
+    console.log(
+      `${LOG_PREFIX} Tip: Start OpenClaw (openclaw gateway start) then restart the relay.`,
+    );
+  }
+
+  const relay = createArkitekRelay(
+    {
+      apiKey: config.arkitekApiKey,
+      autoReconnect: config.autoReconnect,
+      baseUrl: config.arkitekRelayUrl,
+    },
+    handler,
+    {
+      onConnect: (agentId) => {
+        console.log(
+          `${LOG_PREFIX} Connected! Agent ${agentId} is live and listening for messages.`,
+        );
+        if (mode === "gateway") {
+          console.log(
+            `${LOG_PREFIX} Messages from ArkiTek will be forwarded to OpenClaw.`,
+          );
+        }
+      },
+      onDisconnect: (reason) =>
+        console.log(`${LOG_PREFIX} Disconnected: ${reason}`),
+      onError: (err) =>
+        console.error(`${LOG_PREFIX} Error: ${err.message}`),
+    },
+  );
+
+  console.log(`${LOG_PREFIX} Connecting to ArkiTek...`);
+  await relay.connect();
+  console.log(
+    `${LOG_PREFIX} Ready. Send a message from the ArkiTek UI to test.`,
+  );
+}
+
+// ── CLI entry point ────────────────────────────────────────────────
+
 const isMainModule =
   typeof process !== "undefined" &&
   process.argv[1] &&
-  realpathSync(fileURLToPath(import.meta.url)) === realpathSync(resolve(process.argv[1]));
+  realpathSync(fileURLToPath(import.meta.url)) ===
+    realpathSync(resolve(process.argv[1]));
 
 if (isMainModule) {
   (async () => {
-    loadEnvFile();
+    const cli = parseArgs(process.argv);
 
-    let apiKey = process.env.ARKITEK_API_KEY;
-
-    if (!apiKey) {
-      if (!process.stdin.isTTY) {
-        console.error(`${LOG_PREFIX} ARKITEK_API_KEY environment variable is required`);
-        process.exit(1);
-      }
-
-      console.log(`\n${LOG_PREFIX} Welcome! Let's connect your agent to ArkiTek.\n`);
-      console.log("  1. Go to https://arkitekai.com");
-      console.log("  2. Navigate to Agents → Add Agent → Create");
-      console.log("  3. Copy the API key (starts with ak_)\n");
-
-      apiKey = await promptForKey();
-
-      if (!apiKey) {
-        console.error(`\n${LOG_PREFIX} No key provided. Exiting.`);
-        process.exit(1);
-      }
-
-      if (!API_KEY_PATTERN.test(apiKey)) {
-        console.error(`\n${LOG_PREFIX} Invalid key format. Keys start with ak_ and are 67 characters.`);
-        process.exit(1);
-      }
-
-      saveKeyToEnv(apiKey);
-      process.env.ARKITEK_API_KEY = apiKey;
-      console.log(`\n${LOG_PREFIX} API key saved to .env — you won't need to enter it again.`);
-    }
-
-    const autoReconnect = process.env.ARKITEK_AUTO_RECONNECT !== "false";
-    const baseUrl = process.env.ARKITEK_RELAY_URL || undefined;
-
-    const gatewayUrl = process.env.OPENCLAW_GATEWAY_URL || DEFAULT_GATEWAY_URL;
-    const gatewayToken = process.env.OPENCLAW_GATEWAY_TOKEN || undefined;
-    const agentId = process.env.OPENCLAW_AGENT_ID || "main";
-
-    let handler: MessageHandler;
-    let mode: string;
-
-    if (process.env.OPENCLAW_GATEWAY_URL || process.env.OPENCLAW_GATEWAY_TOKEN) {
-      handler = createGatewayHandler(gatewayUrl, gatewayToken, agentId);
-      mode = "gateway";
-      upsertEnvVar("OPENCLAW_GATEWAY_URL", gatewayUrl);
-      if (gatewayToken) upsertEnvVar("OPENCLAW_GATEWAY_TOKEN", gatewayToken);
-      console.log(`${LOG_PREFIX} Mode: OpenClaw Gateway (${gatewayUrl}, agent: ${agentId})`);
-    } else {
-      let detected = false;
-      try {
-        const probe = await fetch(`${gatewayUrl}/v1/responses`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "x-openclaw-agent-id": agentId },
-          body: JSON.stringify({ model: "openclaw", input: "" }),
-          signal: AbortSignal.timeout(2_000),
-        });
-        if (probe.status !== 0) {
-          detected = true;
+    switch (cli.command) {
+      case "help":
+        printHelp();
+        break;
+      case "install":
+        await runInstall(cli);
+        break;
+      case "doctor":
+        await runDoctor(cli);
+        break;
+      case "status":
+        await runStatus();
+        break;
+      case "logs":
+        await runLogs();
+        break;
+      case "uninstall":
+        await runUninstall(cli);
+        break;
+      case "init-skill":
+        await runInitSkill(cli);
+        break;
+      case "start":
+      default: {
+        const ranInstall = isFirstRun() && process.stdin.isTTY;
+        if (ranInstall) {
+          await runInstall(cli);
+          console.log();
         }
-      } catch {
-        // gateway not reachable
-      }
-
-      if (detected) {
-        handler = createGatewayHandler(gatewayUrl, gatewayToken, agentId);
-        mode = "gateway";
-        upsertEnvVar("OPENCLAW_GATEWAY_URL", gatewayUrl);
-        console.log(`${LOG_PREFIX} Mode: OpenClaw Gateway auto-detected (${gatewayUrl}, agent: ${agentId})`);
-        console.log(`${LOG_PREFIX} Saved OPENCLAW_GATEWAY_URL to .env for future runs.`);
-      } else {
-        handler = async (message) => {
-          console.log(`${LOG_PREFIX} [Echo] Received: ${message.content.slice(0, 100)}`);
-          return `Echo: ${message.content}`;
-        };
-        mode = "echo";
-        console.log(`${LOG_PREFIX} Mode: Echo (no OpenClaw gateway detected)`);
-        console.log(`${LOG_PREFIX} Tip: Set OPENCLAW_GATEWAY_URL to forward messages to your agent.`);
+        await startRelay(cli, ranInstall);
+        break;
       }
     }
-
-    const relay = createArkitekRelay(
-      { apiKey, autoReconnect, baseUrl },
-      handler,
-      {
-        onConnect: (agentId) => {
-          console.log(`${LOG_PREFIX} Connected! Agent ${agentId} is live and listening for messages.`);
-          if (mode === "gateway") {
-            console.log(`${LOG_PREFIX} Messages from ArkiTek will be forwarded to OpenClaw.`);
-          }
-        },
-        onDisconnect: (reason) =>
-          console.log(`${LOG_PREFIX} Disconnected: ${reason}`),
-        onError: (err) =>
-          console.error(`${LOG_PREFIX} Error: ${err.message}`),
-      }
-    );
-
-    console.log(`${LOG_PREFIX} Connecting to ArkiTek...`);
-    await relay.connect();
-    console.log(`${LOG_PREFIX} Ready. Send a message from the ArkiTek UI to test.`);
   })().catch((err: unknown) => {
     console.error(`${LOG_PREFIX} Fatal:`, err);
     process.exit(1);

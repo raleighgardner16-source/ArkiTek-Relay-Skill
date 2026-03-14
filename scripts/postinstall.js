@@ -13,5 +13,9 @@ console.log(`
 
     ${YELLOW}npx arkitek-relay-skill${RESET}
 
-  ${DIM}You'll be asked for your API key from https://arkitekai.com${RESET}
+  ${DIM}The installer will auto-detect your OpenClaw config, prompt for
+  your API key, and connect your agent to ArkiTek.${RESET}
+
+  ${DIM}Run diagnostics anytime:  npx arkitek-relay-skill --doctor${RESET}
+  ${DIM}See all commands:          npx arkitek-relay-skill --help${RESET}
 `);

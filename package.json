@@ -1,6 +1,6 @@
 {
   "name": "arkitek-relay-skill",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "Connect your OpenClaw agent to ArkiTek via secure outbound SSE relay",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -21,10 +21,11 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "clean": "rm -rf dist",
+    "prepublishOnly": "npm run clean && npm run build && npm test",
     "postinstall": "node scripts/postinstall.js"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.3.0"
   },
   "keywords": [
     "openclaw",
@@ -34,11 +35,12 @@
     "sse",
     "skill"
   ],
-  "author": "",
+  "author": "raleighgardner16-source",
   "files": [
     "dist",
     "scripts/postinstall.js",
     ".env.example",
+    "SKILL.md",
     "README.md",
     "LICENSE"
   ],

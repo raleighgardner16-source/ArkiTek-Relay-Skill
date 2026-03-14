@@ -87,5 +87,17 @@ export async function queryCouncil(
     );
   }
 
-  return (await response.json()) as CouncilResponse;
+  const data: unknown = await response.json();
+
+  if (
+    typeof data !== "object" || data === null ||
+    typeof (data as Record<string, unknown>).success !== "boolean" ||
+    !Array.isArray((data as Record<string, unknown>).responses)
+  ) {
+    throw new Error(
+      `${LOG_PREFIX} Council returned an unexpected response shape`
+    );
+  }
+
+  return data as CouncilResponse;
 }

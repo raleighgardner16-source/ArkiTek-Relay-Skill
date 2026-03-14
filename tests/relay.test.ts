@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vitest";
 import * as http from "node:http";
 import { RelayClient } from "../src/relay.js";
 import { maskKey, validateApiKey, checkTlsSafety, warnIfNotHttps } from "../src/validation.js";
@@ -15,12 +15,16 @@ function createMockSSEServer(): {
   sendEvent: (event: string, data: string) => void;
   lastAuthHeader: string | undefined;
   respondRequests: Array<{ messageId: string; content: string }>;
+  respondAttempts: number;
   authBehavior: "accept" | "reject_401" | "reject_403";
+  respondBehavior: "success" | "server_error_then_success";
 } {
   const connections: ServerResponse[] = [];
   const respondRequests: Array<{ messageId: string; content: string }> = [];
+  let respondAttempts = 0;
   let lastAuthHeader: string | undefined;
   let authBehavior: "accept" | "reject_401" | "reject_403" = "accept";
+  let respondBehavior: "success" | "server_error_then_success" = "success";
   let port = 0;
 
   const server = http.createServer(
@@ -63,6 +67,14 @@ function createMockSSEServer(): {
           body += chunk.toString();
         });
         req.on("end", () => {
+          respondAttempts++;
+
+          if (respondBehavior === "server_error_then_success" && respondAttempts <= 2) {
+            res.writeHead(503);
+            res.end("Service Unavailable");
+            return;
+          }
+
           try {
             const parsed = JSON.parse(body);
             respondRequests.push(parsed);
@@ -116,8 +128,11 @@ function createMockSSEServer(): {
     sendEvent,
     get lastAuthHeader() { return lastAuthHeader; },
     respondRequests,
+    get respondAttempts() { return respondAttempts; },
     get authBehavior() { return authBehavior; },
     set authBehavior(v) { authBehavior = v; },
+    get respondBehavior() { return respondBehavior; },
+    set respondBehavior(v) { respondAttempts = 0; respondBehavior = v; },
   };
 }
 
@@ -572,6 +587,144 @@ describe("RelayClient", () => {
     errorSpy.mockRestore();
     client.disconnect();
   });
+
+  it("throws on connect() after auth_failed state", async () => {
+    mock.authBehavior = "reject_401";
+    const client = new RelayClient(
+      { apiKey: VALID_KEY, baseUrl: `http://localhost:${mock.port}` },
+      async () => ""
+    );
+
+    await expect(client.connect()).rejects.toThrow("API key invalid or revoked");
+    expect(client.getState()).toBe("auth_failed");
+
+    await expect(client.connect()).rejects.toThrow("Cannot connect");
+  });
+
+  it("recovers activeHandlers after synchronous handler throw", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    let callCount = 0;
+    const handler = vi.fn((_msg) => {
+      callCount++;
+      if (callCount === 1) {
+        throw new Error("sync boom");
+      }
+      return Promise.resolve("ok");
+    });
+
+    const client = new RelayClient(
+      { apiKey: VALID_KEY, baseUrl: `http://localhost:${mock.port}` },
+      handler
+    );
+
+    await client.connect();
+
+    mock.sendEvent(
+      "new_message",
+      JSON.stringify({
+        messageId: "msg-sync-throw",
+        content: "trigger sync error",
+        userId: "user-1",
+        timestamp: new Date().toISOString(),
+      })
+    );
+    await wait(200);
+
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.stringContaining("Handler threw synchronously")
+    );
+
+    mock.sendEvent(
+      "new_message",
+      JSON.stringify({
+        messageId: "msg-after-throw",
+        content: "should still work",
+        userId: "user-1",
+        timestamp: new Date().toISOString(),
+      })
+    );
+    await wait(300);
+
+    expect(handler).toHaveBeenCalledTimes(2);
+    expect(mock.respondRequests).toHaveLength(1);
+    expect(mock.respondRequests[0].messageId).toBe("msg-after-throw");
+
+    errorSpy.mockRestore();
+    client.disconnect();
+  });
+
+  it("gracefulDisconnect waits for in-flight handlers", async () => {
+    let resolveHandler: (() => void) | null = null;
+    const handler = vi.fn(() => {
+      return new Promise<string>((resolve) => {
+        resolveHandler = () => resolve("delayed response");
+      });
+    });
+
+    const client = new RelayClient(
+      { apiKey: VALID_KEY, baseUrl: `http://localhost:${mock.port}` },
+      handler
+    );
+
+    await client.connect();
+
+    mock.sendEvent(
+      "new_message",
+      JSON.stringify({
+        messageId: "msg-drain",
+        content: "slow message",
+        userId: "user-1",
+        timestamp: new Date().toISOString(),
+      })
+    );
+    await wait(100);
+    expect(handler).toHaveBeenCalledOnce();
+
+    const drainPromise = client.gracefulDisconnect("test drain");
+
+    await wait(200);
+    expect(client.getState()).not.toBe("disconnected");
+
+    resolveHandler!();
+    await drainPromise;
+
+    expect(client.getState()).toBe("disconnected");
+    expect(mock.respondRequests).toHaveLength(1);
+    expect(mock.respondRequests[0].content).toBe("delayed response");
+  });
+
+  it("retries on 5xx respond errors then succeeds", async () => {
+    mock.respondBehavior = "server_error_then_success";
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const handler = vi.fn(async () => "retry response");
+    const client = new RelayClient(
+      { apiKey: VALID_KEY, baseUrl: `http://localhost:${mock.port}` },
+      handler
+    );
+
+    await client.connect();
+
+    mock.sendEvent(
+      "new_message",
+      JSON.stringify({
+        messageId: "msg-5xx",
+        content: "trigger 5xx",
+        userId: "user-1",
+        timestamp: new Date().toISOString(),
+      })
+    );
+
+    await wait(5000);
+
+    expect(mock.respondAttempts).toBeGreaterThan(1);
+    expect(mock.respondRequests).toHaveLength(1);
+    expect(mock.respondRequests[0].content).toBe("retry response");
+
+    errorSpy.mockRestore();
+    client.disconnect();
+  });
 });
 
 describe("warnIfNotHttps", () => {
@@ -599,8 +752,13 @@ describe("warnIfNotHttps", () => {
   });
 });
 
-describe("Council client", async () => {
-  const { queryCouncil } = await import("../src/council.js");
+describe("Council client", () => {
+  let queryCouncil: typeof import("../src/council.js")["queryCouncil"];
+
+  beforeAll(async () => {
+    const mod = await import("../src/council.js");
+    queryCouncil = mod.queryCouncil;
+  });
 
   it("rejects prompt exceeding 100KB", async () => {
     const longPrompt = "x".repeat(100 * 1024 + 1);

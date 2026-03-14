@@ -17,11 +17,14 @@ import {
   RESPOND_TIMEOUT_MS,
   RESPOND_MAX_RETRIES,
   RESPOND_RETRY_DELAY_MS,
+  CONNECT_TIMEOUT_MS,
   RECONNECT_BASE_MS,
   RECONNECT_MAX_MS,
   MAX_SSE_BUFFER_SIZE,
   MAX_IMAGES_PER_MESSAGE,
   MAX_IMAGE_SIZE,
+  GRACEFUL_DRAIN_MS,
+  GRACEFUL_DRAIN_POLL_MS,
 } from "./types.js";
 import { maskKey, validateApiKey, checkTlsSafety, warnIfNotHttps } from "./validation.js";
 
@@ -96,7 +99,7 @@ export class RelayClient {
     this.events = events;
 
     this.boundShutdown = () => {
-      this.disconnect("process signal");
+      this.gracefulDisconnect("process signal").catch(() => {});
     };
   }
 
@@ -114,8 +117,11 @@ export class RelayClient {
       return;
     }
     if (this.state === "auth_failed") {
-      logError("Cannot connect — API key was rejected. Please check your key.");
-      return;
+      const err = new Error(
+        "Cannot connect — API key was previously rejected. Please check your key and create a new RelayClient instance."
+      );
+      logError(err.message);
+      throw err;
     }
 
     this.shutdownRequested = false;
@@ -134,18 +140,46 @@ export class RelayClient {
   }
 
   disconnect(reason = "manual"): void {
+    this.forceDisconnect(reason);
+  }
+
+  async gracefulDisconnect(reason = "manual"): Promise<void> {
     this.shutdownRequested = true;
-    const hadPendingConnect = this.connectReject !== null;
+
+    if (this.activeHandlers > 0) {
+      log(`Waiting up to ${GRACEFUL_DRAIN_MS / 1000}s for ${this.activeHandlers} in-flight handler(s) to complete...`);
+      const deadline = Date.now() + GRACEFUL_DRAIN_MS;
+      while (this.activeHandlers > 0 && Date.now() < deadline) {
+        await sleep(GRACEFUL_DRAIN_POLL_MS);
+      }
+      if (this.activeHandlers > 0) {
+        log(`Drain timeout reached with ${this.activeHandlers} handler(s) still active. Forcing disconnect.`);
+      } else {
+        log("All handlers drained successfully.");
+      }
+    }
+
+    this.forceDisconnect(reason);
+  }
+
+  private forceDisconnect(reason: string): void {
+    this.shutdownRequested = true;
+
+    // Capture and clear the pending connect callbacks before cleanup,
+    // since aborting the controller could trigger async handlers that
+    // also reference these callbacks.
+    const pendingReject = this.connectReject;
+    this.connectResolve = null;
+    this.connectReject = null;
+
     this.cleanup();
     this.state = "disconnected";
     this.unregisterShutdownHandlers();
     log(`Disconnected (reason: ${reason})`);
     this.emitSafe("onDisconnect", reason);
-    if (hadPendingConnect) {
-      this.connectReject?.(new Error(`Disconnected before connection was established (reason: ${reason})`));
+    if (pendingReject) {
+      pendingReject(new Error(`Disconnected before connection was established (reason: ${reason})`));
     }
-    this.connectResolve = null;
-    this.connectReject = null;
   }
 
   private registerShutdownHandlers(): void {
@@ -180,6 +214,9 @@ export class RelayClient {
     log(`Connecting to ${url}...`);
 
     try {
+      const timeoutSignal = AbortSignal.timeout(CONNECT_TIMEOUT_MS);
+      const signal = AbortSignal.any([this.abortController.signal, timeoutSignal]);
+
       const response = await fetch(url, {
         method: "GET",
         headers: {
@@ -187,7 +224,7 @@ export class RelayClient {
           Accept: "text/event-stream",
           "Cache-Control": "no-cache",
         },
-        signal: this.abortController.signal,
+        signal,
       });
 
       if (response.status === 401 || response.status === 403) {
@@ -266,7 +303,8 @@ export class RelayClient {
             currentEvent = line.slice(6).trim();
           } else if (line.startsWith("data:")) {
             if (currentData) currentData += "\n";
-            currentData += line.slice(5).trim();
+            const raw = line.slice(5);
+            currentData += raw.startsWith(" ") ? raw.slice(1) : raw;
           } else if (line === "") {
             if (currentEvent && currentData) {
               this.handleSSEEvent(currentEvent, currentData);
@@ -319,8 +357,9 @@ export class RelayClient {
         }
         case "new_message": {
           const data = JSON.parse(rawData) as IncomingMessage;
-          if (!data.messageId || !data.content) {
-            logError("Received malformed new_message — missing messageId or content");
+          if (typeof data.messageId !== "string" || !data.messageId ||
+              typeof data.content !== "string" || !data.content) {
+            logError("Received malformed new_message — missing or invalid messageId/content");
             break;
           }
           this.processMessage(data);
@@ -340,6 +379,10 @@ export class RelayClient {
       logError(
         `Dropping message ${message.messageId} — concurrency limit reached (${MAX_CONCURRENT_HANDLERS} active handlers)`
       );
+      this.sendResponse(
+        message.messageId,
+        "[Error] Agent is at capacity. Please try again shortly.",
+      ).catch(() => {});
       return;
     }
 
@@ -365,7 +408,17 @@ export class RelayClient {
     this.activeHandlers++;
     log(`Received message ${message.messageId} from user ${message.userId}`);
 
-    this.handler(message)
+    let handlerResult: Promise<string>;
+    try {
+      handlerResult = this.handler(message);
+    } catch (err: unknown) {
+      this.activeHandlers--;
+      const msg = err instanceof Error ? err.message : String(err);
+      logError(`Handler threw synchronously for message ${message.messageId}: ${msg}`);
+      return;
+    }
+
+    Promise.resolve(handlerResult)
       .then((responseContent) => this.sendResponse(message.messageId, responseContent))
       .catch((err: unknown) => {
         const msg = err instanceof Error ? err.message : String(err);
@@ -385,7 +438,7 @@ export class RelayClient {
       );
       const truncatedBytes = encoded.slice(0, MAX_RESPONSE_SIZE);
       content = new TextDecoder().decode(truncatedBytes);
-      if (content.endsWith("\uFFFD")) {
+      while (content.endsWith("\uFFFD")) {
         content = content.slice(0, -1);
       }
     }
@@ -407,6 +460,15 @@ export class RelayClient {
 
         if (!response.ok) {
           const body = await response.text().catch(() => "");
+
+          if (response.status >= 500 && attempt < RESPOND_MAX_RETRIES) {
+            logError(
+              `Server error sending response for ${messageId}: HTTP ${response.status} (attempt ${attempt + 1}/${RESPOND_MAX_RETRIES + 1}). Retrying...`
+            );
+            await sleep(RESPOND_RETRY_DELAY_MS * (attempt + 1));
+            continue;
+          }
+
           logError(
             `Failed to send response for ${messageId}: HTTP ${response.status} — ${body}`
           );

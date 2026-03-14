@@ -36,7 +36,8 @@ export function warnIfNotHttps(url: string): void {
         "Use HTTPS in production to prevent credential exposure."
     );
     if (warnedUrls.size >= MAX_WARNED_URLS) {
-      warnedUrls.clear();
+      const first = warnedUrls.values().next().value;
+      if (first !== undefined) warnedUrls.delete(first);
     }
     warnedUrls.add(url);
   }
