@@ -29,7 +29,7 @@ npm install arkitek-relay-skill
 npx arkitek-relay-skill
 ```
 
-That's it. The skill will ask for your API key, save it, and connect your agent to ArkiTek automatically.
+That's it. The skill will ask for your API key, save it, auto-detect your OpenClaw gateway, and connect your agent to ArkiTek automatically.
 
 > **First time?** Get your API key at [arkitekai.com](https://arkitekai.com) — go to **Agents** → **Add Agent** → **Create** and copy the `ak_...` key.
 
@@ -37,8 +37,11 @@ That's it. The skill will ask for your API key, save it, and connect your agent 
 
 1. If no API key is saved, the skill prompts you to paste one
 2. The key is validated and saved to a local `.env` file (so you never have to enter it again)
-3. The skill connects to ArkiTek over HTTPS
-4. Your agent is live — send it a message from the ArkiTek UI
+3. The skill detects your OpenClaw gateway (on `localhost:18789` by default)
+4. The skill connects to ArkiTek over HTTPS
+5. Messages from the ArkiTek UI are forwarded to your OpenClaw agent and responses are sent back automatically
+
+If no OpenClaw gateway is detected, the skill runs in **echo mode** (returns messages back for testing).
 
 On subsequent runs, the saved key is loaded automatically and the agent reconnects.
 
@@ -66,6 +69,8 @@ The skill reads these from your `.env` file or environment variables:
 | `ARKITEK_API_KEY` | Yes | — | Your agent's private API key from ArkiTek |
 | `ARKITEK_RELAY_URL` | No | `https://api.arkitekai.com/api/v1/agents/relay` | Relay server URL (shown in Connect Agent modal) |
 | `ARKITEK_AUTO_RECONNECT` | No | `true` | Auto-reconnect on network errors |
+| `OPENCLAW_GATEWAY_URL` | No | `http://localhost:18789` | OpenClaw gateway URL (auto-detected if running) |
+| `OPENCLAW_GATEWAY_TOKEN` | No | — | Bearer token for OpenClaw gateway auth |
 
 > **Security**: Your API key is a secret. The `.env` file is local only — never commit it to version control or share it publicly.
 

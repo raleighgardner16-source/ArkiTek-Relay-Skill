@@ -22,6 +22,7 @@ export { queryCouncil } from "./council.js";
 import {
   type ArkitekConfig,
   type ArkitekRelayEvents,
+  type IncomingMessage,
   type MessageHandler,
   type ConnectionState,
   LOG_PREFIX,
@@ -32,6 +33,9 @@ import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import { readFileSync, writeFileSync, existsSync, realpathSync } from "node:fs";
 import { createInterface } from "node:readline";
+
+const GATEWAY_TIMEOUT_MS = 120_000;
+const DEFAULT_GATEWAY_URL = "http://localhost:18789";
 
 export function createArkitekRelay(
   config: ArkitekConfig,
@@ -86,6 +90,57 @@ function saveKeyToEnv(apiKey: string): void {
   }
 }
 
+function createGatewayHandler(gatewayUrl: string, gatewayToken?: string): MessageHandler {
+  const completionsUrl = `${gatewayUrl.replace(/\/+$/, "")}/v1/chat/completions`;
+
+  return async (message: IncomingMessage): Promise<string> => {
+    console.log(`${LOG_PREFIX} [Gateway] Forwarding message ${message.messageId} to OpenClaw...`);
+
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (gatewayToken) {
+      headers["Authorization"] = `Bearer ${gatewayToken}`;
+    }
+
+    const body = JSON.stringify({
+      messages: [{ role: "user", content: message.content }],
+    });
+
+    try {
+      const resp = await fetch(completionsUrl, {
+        method: "POST",
+        headers,
+        body,
+        signal: AbortSignal.timeout(GATEWAY_TIMEOUT_MS),
+      });
+
+      if (!resp.ok) {
+        const errBody = await resp.text().catch(() => "");
+        console.error(
+          `${LOG_PREFIX} [Gateway] OpenClaw returned HTTP ${resp.status}: ${errBody.slice(0, 200)}`
+        );
+        return `[Error] Agent gateway returned HTTP ${resp.status}. Check your OPENCLAW_GATEWAY_URL and OPENCLAW_GATEWAY_TOKEN.`;
+      }
+
+      const data = (await resp.json()) as {
+        choices?: { message?: { content?: string } }[];
+      };
+
+      const reply = data.choices?.[0]?.message?.content;
+      if (!reply) {
+        console.error(`${LOG_PREFIX} [Gateway] Unexpected response shape:`, JSON.stringify(data).slice(0, 300));
+        return "[Error] Agent returned an empty response.";
+      }
+
+      console.log(`${LOG_PREFIX} [Gateway] Got response (${reply.length} chars) for message ${message.messageId}`);
+      return reply;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`${LOG_PREFIX} [Gateway] Failed to reach OpenClaw: ${msg}`);
+      return `[Error] Could not reach the agent gateway at ${gatewayUrl}. Is your OpenClaw agent running?`;
+    }
+  };
+}
+
 const isMainModule =
   typeof process !== "undefined" &&
   process.argv[1] &&
@@ -128,17 +183,52 @@ if (isMainModule) {
     const autoReconnect = process.env.ARKITEK_AUTO_RECONNECT !== "false";
     const baseUrl = process.env.ARKITEK_RELAY_URL || undefined;
 
-    const echoHandler: MessageHandler = async (message) => {
-      console.log(`${LOG_PREFIX} [Echo] Received: ${message.content.slice(0, 100)}`);
-      return `Echo: ${message.content}`;
-    };
+    const gatewayUrl = process.env.OPENCLAW_GATEWAY_URL || DEFAULT_GATEWAY_URL;
+    const gatewayToken = process.env.OPENCLAW_GATEWAY_TOKEN || undefined;
+
+    let handler: MessageHandler;
+    let mode: string;
+
+    if (process.env.OPENCLAW_GATEWAY_URL || process.env.OPENCLAW_GATEWAY_TOKEN) {
+      handler = createGatewayHandler(gatewayUrl, gatewayToken);
+      mode = "gateway";
+      console.log(`${LOG_PREFIX} Mode: OpenClaw Gateway (${gatewayUrl})`);
+    } else {
+      try {
+        const probe = await fetch(`${gatewayUrl}/v1/chat/completions`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ messages: [] }),
+          signal: AbortSignal.timeout(2_000),
+        });
+        if (probe.status !== 0) {
+          handler = createGatewayHandler(gatewayUrl, gatewayToken);
+          mode = "gateway";
+          console.log(`${LOG_PREFIX} Mode: OpenClaw Gateway auto-detected (${gatewayUrl})`);
+        } else {
+          throw new Error("unreachable");
+        }
+      } catch {
+        handler = async (message) => {
+          console.log(`${LOG_PREFIX} [Echo] Received: ${message.content.slice(0, 100)}`);
+          return `Echo: ${message.content}`;
+        };
+        mode = "echo";
+        console.log(`${LOG_PREFIX} Mode: Echo (no OpenClaw gateway detected)`);
+        console.log(`${LOG_PREFIX} Tip: Set OPENCLAW_GATEWAY_URL to forward messages to your agent.`);
+      }
+    }
 
     const relay = createArkitekRelay(
       { apiKey, autoReconnect, baseUrl },
-      echoHandler,
+      handler,
       {
-        onConnect: (agentId) =>
-          console.log(`${LOG_PREFIX} Connected! Agent ${agentId} is live and listening for messages.`),
+        onConnect: (agentId) => {
+          console.log(`${LOG_PREFIX} Connected! Agent ${agentId} is live and listening for messages.`);
+          if (mode === "gateway") {
+            console.log(`${LOG_PREFIX} Messages from ArkiTek will be forwarded to OpenClaw.`);
+          }
+        },
         onDisconnect: (reason) =>
           console.log(`${LOG_PREFIX} Disconnected: ${reason}`),
         onError: (err) =>

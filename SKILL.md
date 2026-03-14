@@ -6,36 +6,42 @@ metadata: {"openclaw": {"requires": {"env": ["ARKITEK_API_KEY"], "bins": ["node"
 
 # ArkiTek Relay Skill
 
-This skill connects your OpenClaw agent to [ArkiTek](https://arkitekai.com) — a web UI for chatting with AI agents remotely. It opens a secure, outbound-only SSE connection from your agent to ArkiTek's cloud relay. No tunnels, public URLs, or open ports required.
+This skill connects your OpenClaw agent to [ArkiTek](https://arkitekai.com) — a web UI for chatting with AI agents remotely. It opens a secure, outbound-only SSE connection from your agent to ArkiTek's cloud relay, and forwards incoming messages directly to your OpenClaw gateway. No tunnels, public URLs, or open ports required.
 
 ## Setup
 
 1. Get your API key from [arkitekai.com](https://arkitekai.com) (Agents → Add Agent → Create)
-2. Set the environment variable or add it to your OpenClaw config:
+2. Set the environment variable:
 
 ```
 ARKITEK_API_KEY=ak_your_key_here
 ```
 
-3. Start the relay by running:
+3. Start the relay:
 
 ```
 npx arkitek-relay-skill
 ```
 
-The skill will connect to ArkiTek and listen for messages. When a user sends a message from the ArkiTek UI, it arrives here. Your response is sent back to ArkiTek automatically.
+The skill auto-detects your OpenClaw gateway on `localhost:18789`. If you use a non-default port or require a token, also set:
+
+```
+OPENCLAW_GATEWAY_URL=http://localhost:18789
+OPENCLAW_GATEWAY_TOKEN=your_token_here
+```
 
 ## When to use this skill
 
-- Use this skill when you want to connect to ArkiTek so users can chat with you remotely
+- Use this skill when you want users to chat with you through the ArkiTek web interface
 - Run `npx arkitek-relay-skill` in the background to maintain the connection
+- Messages from ArkiTek are forwarded to your OpenClaw gateway and responses are sent back automatically
 - The connection auto-reconnects if it drops
 
 ## How it works
 
 ```
-ArkiTek Web UI  ←→  ArkiTek Cloud  ←——SSE——  Your Agent (this skill)
-    (user)            (relay)         ——POST→
+ArkiTek Web UI  ←→  ArkiTek Cloud  ←——SSE——  This Skill  ——POST→  OpenClaw Gateway
+    (user)            (relay)                  (bridge)             (your agent)
 ```
 
 All connections are outbound from the agent. Nothing is exposed on the agent's network.
