@@ -6,11 +6,16 @@ import {
   mkdirSync,
   copyFileSync,
 } from "node:fs";
+import { execFile } from "node:child_process";
 import { join, resolve, dirname } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import type { OpenClawDetectedConfig } from "../types.js";
 import { LOG_PREFIX } from "../types.js";
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 const SKILL_NAME = "arkitek-relay";
 
@@ -144,91 +149,103 @@ export async function testResponsesEndpoint(
   }
 }
 
+export interface EnableResult {
+  configEdited: boolean;
+  gatewayRestarted: boolean;
+  endpointVerified: boolean;
+}
+
 /**
- * Enables the /v1/responses endpoint by patching ~/.openclaw/openclaw.json
- * directly. This is the same file detectOpenClaw() reads, so it works
- * regardless of OpenClaw version or whether the gateway exposes an HTTP
- * config API.
+ * Enables the /v1/responses endpoint by:
+ * 1. Patching ~/.openclaw/openclaw.json directly (reliable, works offline)
+ * 2. Restarting the gateway via `openclaw gateway restart` so it picks up
+ *    the change (OpenClaw uses WebSocket internally, not HTTP REST, so
+ *    there is no HTTP config patch API)
+ * 3. Waiting for the gateway to come back up
+ * 4. Verifying the endpoint is live
  *
  * Security: applies the same checks as detectOpenClaw() — verifies the
  * file is a regular file owned by the current user before writing.
- *
- * Falls back to the HTTP config patch API if the file edit fails.
  */
 export async function enableResponsesEndpoint(
   gatewayUrl: string,
   token?: string,
-): Promise<boolean> {
+): Promise<EnableResult> {
+  const result: EnableResult = {
+    configEdited: false,
+    gatewayRestarted: false,
+    endpointVerified: false,
+  };
+
+  // ── Step 1: Edit the config file ──────────────────────────────
   const configPath = join(homedir(), ".openclaw", "openclaw.json");
 
-  if (existsSync(configPath)) {
-    try {
-      const stat = lstatSync(configPath);
-
-      // Same safety checks as detectOpenClaw()
-      if (!stat.isFile()) {
-        console.warn(
-          `${LOG_PREFIX} ${configPath} is not a regular file, refusing to write`,
-        );
-      } else {
-        const getuid = process.getuid;
-        if (typeof getuid === "function" && stat.uid !== getuid()) {
-          console.warn(
-            `${LOG_PREFIX} ${configPath} is owned by uid ${stat.uid}, current user is ${getuid()}. Refusing to write.`,
-          );
-        } else {
-          const content = readFileSync(configPath, "utf-8");
-          const config = JSON.parse(content);
-
-          if (!config.gateway) config.gateway = {};
-          if (!config.gateway.http) config.gateway.http = {};
-          if (!config.gateway.http.endpoints) config.gateway.http.endpoints = {};
-          if (!config.gateway.http.endpoints.responses) config.gateway.http.endpoints.responses = {};
-          config.gateway.http.endpoints.responses.enabled = true;
-
-          const originalMode = stat.mode & 0o777;
-          writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", {
-            mode: originalMode || 0o600,
-          });
-          return true;
-        }
-      }
-    } catch {
-      // File edit failed, try HTTP fallback
-    }
+  if (!existsSync(configPath)) {
+    return result;
   }
 
-  // Fallback: try the HTTP config patch API
   try {
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-    };
-    if (token) {
-      headers["Authorization"] = `Bearer ${token}`;
+    const stat = lstatSync(configPath);
+
+    if (!stat.isFile()) {
+      console.warn(
+        `${LOG_PREFIX} ${configPath} is not a regular file, refusing to write`,
+      );
+      return result;
     }
 
-    const response = await fetch(
-      `${gatewayUrl.replace(/\/+$/, "")}/api/gateway/config/patch`,
-      {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          gateway: {
-            http: {
-              endpoints: {
-                responses: { enabled: true },
-              },
-            },
-          },
-        }),
-        signal: AbortSignal.timeout(5_000),
-      },
-    );
+    const getuid = process.getuid;
+    if (typeof getuid === "function" && stat.uid !== getuid()) {
+      console.warn(
+        `${LOG_PREFIX} ${configPath} is owned by uid ${stat.uid}, current user is ${getuid()}. Refusing to write.`,
+      );
+      return result;
+    }
 
-    return response.ok;
-  } catch {
-    return false;
+    const content = readFileSync(configPath, "utf-8");
+    const config = JSON.parse(content);
+
+    if (!config.gateway) config.gateway = {};
+    if (!config.gateway.http) config.gateway.http = {};
+    if (!config.gateway.http.endpoints) config.gateway.http.endpoints = {};
+    if (!config.gateway.http.endpoints.responses) config.gateway.http.endpoints.responses = {};
+    config.gateway.http.endpoints.responses.enabled = true;
+
+    const originalMode = stat.mode & 0o777;
+    writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", {
+      mode: originalMode || 0o600,
+    });
+    result.configEdited = true;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`${LOG_PREFIX} Failed to edit config file: ${msg}`);
+    return result;
   }
+
+  // ── Step 2: Restart the gateway ───────────────────────────────
+  try {
+    await new Promise<void>((resolve, reject) => {
+      execFile("openclaw", ["gateway", "restart"], { timeout: 10_000 }, (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+    result.gatewayRestarted = true;
+  } catch {
+    // openclaw CLI not found or restart failed — user will need to restart manually
+    return result;
+  }
+
+  // ── Step 3: Wait for gateway to come back up ──────────────────
+  await sleep(3_000);
+
+  // ── Step 4: Verify the endpoint is live ───────────────────────
+  const status = await testResponsesEndpoint(gatewayUrl, token);
+  if (status === "enabled") {
+    result.endpointVerified = true;
+  }
+
+  return result;
 }
 
 // ── SKILL.md placement ─────────────────────────────────────────────

@@ -434,23 +434,41 @@ export async function runInstall(cli: CLIOptions): Promise<void> {
         );
       }
 
-      const enabled = await enableResponsesEndpoint(gatewayUrl, gatewayToken);
-      if (enabled) {
-        ui.success("/v1/responses endpoint enabled");
+      const enableResult = await enableResponsesEndpoint(gatewayUrl, gatewayToken);
+
+      if (enableResult.configEdited) {
+        ui.success("Config file updated (responses endpoint enabled)");
+      } else {
+        ui.error("Failed to update the config file.");
+      }
+
+      if (enableResult.gatewayRestarted) {
+        ui.success("Gateway restarted to pick up the change");
+      } else if (enableResult.configEdited) {
+        ui.warn("Could not restart the gateway automatically.");
+        ui.dimmed("  Run: openclaw gateway restart");
+      }
+
+      if (enableResult.endpointVerified) {
+        ui.success("/v1/responses endpoint is now live");
         responsesReady = true;
         results.push({ label: "/v1/responses", status: "pass", detail: "enabled during setup" });
+      } else if (enableResult.configEdited) {
+        ui.warn("Could not verify the endpoint is live yet.");
+        ui.dimmed("  It should be active once the gateway finishes restarting.");
+        responsesReady = true;
+        results.push({ label: "/v1/responses", status: "warn", detail: "config edited, unverified" });
       } else {
         ui.error("Failed to enable the endpoint automatically.");
         console.log();
         ui.error("You MUST enable it manually before the relay will work:");
-        ui.dimmed(
-          "  openclaw gateway config.patch --set gateway.http.endpoints.responses.enabled=true",
-        );
+        ui.dimmed("  1. Edit ~/.openclaw/openclaw.json");
+        ui.dimmed("  2. Set gateway.http.endpoints.responses.enabled = true");
+        ui.dimmed("  3. Run: openclaw gateway restart");
         results.push({ label: "/v1/responses", status: "fail", detail: "auto-enable failed" });
       }
     }
   } else {
-    // Gateway not reachable — can still patch the config file
     ui.warn("Gateway is not reachable — cannot verify the endpoint live.");
     ui.info("Setup will enable it in the OpenClaw config file so it's ready");
     ui.info("when the gateway starts.");
@@ -462,19 +480,37 @@ export async function runInstall(cli: CLIOptions): Promise<void> {
       );
     }
 
-    const enabled = await enableResponsesEndpoint(gatewayUrl, gatewayToken);
-    if (enabled) {
+    const enableResult = await enableResponsesEndpoint(gatewayUrl, gatewayToken);
+
+    if (enableResult.configEdited) {
       ui.success("/v1/responses enabled in OpenClaw config");
-      ui.dimmed("The change will take effect when the gateway starts.");
-      responsesReady = true;
-      results.push({ label: "/v1/responses", status: "pass", detail: "enabled in config" });
+
+      if (enableResult.gatewayRestarted) {
+        ui.success("Gateway restarted — waiting for it to come back up...");
+
+        if (enableResult.endpointVerified) {
+          ui.success("/v1/responses endpoint is now live");
+          responsesReady = true;
+          results.push({ label: "/v1/responses", status: "pass", detail: "enabled and verified" });
+        } else {
+          ui.dimmed("  Gateway restarted but endpoint not responding yet.");
+          ui.dimmed("  It should become available shortly.");
+          responsesReady = true;
+          results.push({ label: "/v1/responses", status: "warn", detail: "config edited, restarted, unverified" });
+        }
+      } else {
+        ui.dimmed("  The change will take effect when the gateway starts/restarts.");
+        ui.dimmed("  Run: openclaw gateway restart");
+        responsesReady = true;
+        results.push({ label: "/v1/responses", status: "warn", detail: "config edited, needs restart" });
+      }
     } else {
       ui.error("Could not enable the endpoint automatically.");
       console.log();
       ui.error("You MUST enable it before the relay will work:");
-      ui.dimmed(
-        "  openclaw gateway config.patch --set gateway.http.endpoints.responses.enabled=true",
-      );
+      ui.dimmed("  1. Edit ~/.openclaw/openclaw.json");
+      ui.dimmed("  2. Set gateway.http.endpoints.responses.enabled = true");
+      ui.dimmed("  3. Run: openclaw gateway restart");
       results.push({ label: "/v1/responses", status: "fail", detail: "config edit failed" });
     }
   }
