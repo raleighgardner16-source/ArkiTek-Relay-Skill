@@ -1,5 +1,6 @@
 import {
   readFileSync,
+  writeFileSync,
   lstatSync,
   existsSync,
   mkdirSync,
@@ -144,12 +145,60 @@ export async function testResponsesEndpoint(
 }
 
 /**
- * Patches the OpenClaw gateway config to enable the /v1/responses endpoint.
+ * Enables the /v1/responses endpoint by patching ~/.openclaw/openclaw.json
+ * directly. This is the same file detectOpenClaw() reads, so it works
+ * regardless of OpenClaw version or whether the gateway exposes an HTTP
+ * config API.
+ *
+ * Security: applies the same checks as detectOpenClaw() — verifies the
+ * file is a regular file owned by the current user before writing.
+ *
+ * Falls back to the HTTP config patch API if the file edit fails.
  */
 export async function enableResponsesEndpoint(
   gatewayUrl: string,
   token?: string,
 ): Promise<boolean> {
+  const configPath = join(homedir(), ".openclaw", "openclaw.json");
+
+  if (existsSync(configPath)) {
+    try {
+      const stat = lstatSync(configPath);
+
+      // Same safety checks as detectOpenClaw()
+      if (!stat.isFile()) {
+        console.warn(
+          `${LOG_PREFIX} ${configPath} is not a regular file, refusing to write`,
+        );
+      } else {
+        const getuid = process.getuid;
+        if (typeof getuid === "function" && stat.uid !== getuid()) {
+          console.warn(
+            `${LOG_PREFIX} ${configPath} is owned by uid ${stat.uid}, current user is ${getuid()}. Refusing to write.`,
+          );
+        } else {
+          const content = readFileSync(configPath, "utf-8");
+          const config = JSON.parse(content);
+
+          if (!config.gateway) config.gateway = {};
+          if (!config.gateway.http) config.gateway.http = {};
+          if (!config.gateway.http.endpoints) config.gateway.http.endpoints = {};
+          if (!config.gateway.http.endpoints.responses) config.gateway.http.endpoints.responses = {};
+          config.gateway.http.endpoints.responses.enabled = true;
+
+          const originalMode = stat.mode & 0o777;
+          writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", {
+            mode: originalMode || 0o600,
+          });
+          return true;
+        }
+      }
+    } catch {
+      // File edit failed, try HTTP fallback
+    }
+  }
+
+  // Fallback: try the HTTP config patch API
   try {
     const headers: Record<string, string> = {
       "Content-Type": "application/json",

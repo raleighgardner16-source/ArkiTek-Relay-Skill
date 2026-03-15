@@ -36,8 +36,13 @@ export function heading(msg: string): void {
   console.log(`\n${BOLD}${msg}${RESET}\n`);
 }
 
+export function separator(): void {
+  console.log(`\n  ${DIM}${"─".repeat(52)}${RESET}`);
+}
+
 export function step(n: number, total: number, msg: string): void {
-  console.log(`\n  ${DIM}[${n}/${total}]${RESET} ${BOLD}${msg}${RESET}`);
+  console.log(`\n  ${DIM}${"─".repeat(52)}${RESET}`);
+  console.log(`  ${DIM}[${n}/${total}]${RESET} ${BOLD}${msg}${RESET}\n`);
 }
 
 export function dimmed(msg: string): void {
@@ -70,4 +75,19 @@ export async function confirm(
   const answer = await prompt(`${question} ${suffix} `);
   if (!answer) return defaultYes;
   return answer.toLowerCase().startsWith("y");
+}
+
+/**
+ * Loops until the user types Y. Used for mandatory steps where declining
+ * is not an option. Returns true when confirmed, or exits if stdin closes.
+ */
+export async function requireConfirm(question: string): Promise<void> {
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const answer = await prompt(`${question} [Y] `);
+    if (answer.toLowerCase() === "y" || answer.toLowerCase() === "yes") {
+      return;
+    }
+    warn("This step is required to continue. Please type Y to confirm.");
+  }
 }

@@ -1,6 +1,7 @@
 import {
   API_KEY_PATTERN,
   DEFAULT_GATEWAY_URL,
+  DEFAULT_BASE_URL,
   PERSISTED_CONFIG_VERSION,
 } from "../types.js";
 import type { CLIOptions } from "../types.js";
@@ -30,7 +31,9 @@ import { dirname } from "node:path";
 import { findEnvKeyLocations, removeApiKeyFromEnvFile } from "./env-cleanup.js";
 import * as ui from "./ui.js";
 
-const TOTAL_STEPS = 9;
+const TOTAL_STEPS = 10;
+
+// ── Helpers ───────────────────────────────────────────────────────
 
 async function promptForApiKey(): Promise<string> {
   console.log();
@@ -60,12 +63,102 @@ async function promptForApiKey(): Promise<string> {
   return apiKey;
 }
 
+async function testApiKeyWithServer(apiKey: string, relayUrl?: string): Promise<boolean> {
+  const baseUrl = (relayUrl || DEFAULT_BASE_URL).replace(/\/+$/, "");
+  try {
+    const response = await fetch(`${baseUrl}/stream`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        Accept: "text/event-stream",
+      },
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    if (response.status === 401 || response.status === 403) {
+      return false;
+    }
+
+    // Any other status (200, 400, etc.) means the key was accepted
+    // Abort the stream immediately — we only needed to check auth
+    try { response.body?.cancel(); } catch { /* ignore */ }
+    return true;
+  } catch {
+    // Network error — can't determine validity, assume ok for now
+    return true;
+  }
+}
+
+// ── Status tracking for summary ───────────────────────────────────
+
+interface StepResult {
+  label: string;
+  status: "pass" | "warn" | "fail" | "skip";
+  detail?: string;
+}
+
+// ── Main install flow ─────────────────────────────────────────────
+
 export async function runInstall(cli: CLIOptions): Promise<void> {
   ui.heading("ArkiTek Relay \u2014 Setup");
 
-  // ── Step 1: Prerequisites ────────────────────────────────────────
+  const results: StepResult[] = [];
 
-  ui.step(1, TOTAL_STEPS, "Checking prerequisites");
+  // ── Step 1: Disclaimer & Consent ──────────────────────────────
+
+  ui.step(1, TOTAL_STEPS, "Important disclaimer");
+
+  console.log();
+  ui.warn("Please read the following carefully before proceeding:");
+  console.log();
+  ui.info(
+    "The ArkiTek Relay connects your local machine to the ArkiTek cloud",
+  );
+  ui.info(
+    "service. Once active, remote instructions from ArkiTek can trigger",
+  );
+  ui.info(
+    "actions on your device through the OpenClaw gateway, including:",
+  );
+  console.log();
+  ui.dimmed("  \u2022 Executing commands and running code on your machine");
+  ui.dimmed("  \u2022 Reading and writing files accessible to your user account");
+  ui.dimmed("  \u2022 Making network requests from your machine");
+  console.log();
+  ui.info(
+    "You are responsible for securing your API key and ensuring your",
+  );
+  ui.info(
+    "OpenClaw gateway is properly configured. Only install this relay",
+  );
+  ui.info(
+    "on machines you trust and control.",
+  );
+  console.log();
+
+  if (!cli.yes) {
+    if (!process.stdin.isTTY) {
+      ui.error("Cannot show interactive disclaimer in non-TTY mode.");
+      ui.dimmed("Run with --yes to accept the disclaimer non-interactively.");
+      process.exit(1);
+    }
+
+    const accepted = await ui.confirm(
+      "I understand the risks and want to proceed with setup",
+      false,
+    );
+    if (!accepted) {
+      ui.info("Setup cancelled. No changes were made.");
+      process.exit(0);
+    }
+  }
+
+  ui.success("Disclaimer accepted");
+  results.push({ label: "Disclaimer", status: "pass" });
+
+  // ── Step 2: Prerequisites ─────────────────────────────────────
+
+  ui.step(2, TOTAL_STEPS, "Checking prerequisites");
 
   const nodeVersion = process.versions.node;
   const major = parseInt(nodeVersion.split(".")[0], 10);
@@ -75,10 +168,11 @@ export async function runInstall(cli: CLIOptions): Promise<void> {
     process.exit(1);
   }
   ui.success(`Node.js ${nodeVersion}`);
+  results.push({ label: "Prerequisites", status: "pass", detail: `Node.js ${nodeVersion}` });
 
-  // ── Step 2: Detect OpenClaw ──────────────────────────────────────
+  // ── Step 3: Detect OpenClaw ───────────────────────────────────
 
-  ui.step(2, TOTAL_STEPS, "Detecting OpenClaw");
+  ui.step(3, TOTAL_STEPS, "Detecting OpenClaw");
 
   const openclaw = detectOpenClaw();
   let gatewayUrl: string;
@@ -95,6 +189,7 @@ export async function runInstall(cli: CLIOptions): Promise<void> {
     if (openclaw.responsesEnabled) {
       ui.success("/v1/responses endpoint: enabled in config");
     }
+    results.push({ label: "OpenClaw", status: "pass", detail: gatewayUrl });
   } else {
     ui.warn("OpenClaw config not found at ~/.openclaw/openclaw.json");
     gatewayUrl = cli.gatewayUrl || DEFAULT_GATEWAY_URL;
@@ -103,15 +198,17 @@ export async function runInstall(cli: CLIOptions): Promise<void> {
     ui.dimmed(
       "If OpenClaw is installed elsewhere, use --gateway-url to specify",
     );
+    results.push({ label: "OpenClaw", status: "warn", detail: "config not found" });
   }
 
-  // ── Step 3: Install SKILL.md ──────────────────────────────────────
+  // ── Step 4: Install SKILL.md ──────────────────────────────────
 
-  ui.step(3, TOTAL_STEPS, "Skill definition (SKILL.md)");
+  ui.step(4, TOTAL_STEPS, "Skill definition (SKILL.md)");
 
   const bundledSkillExists = existsSync(getBundledSkillPath());
   if (!bundledSkillExists) {
     ui.warn("Bundled SKILL.md not found in package — skipping placement");
+    results.push({ label: "SKILL.md", status: "warn", detail: "not bundled" });
   } else {
     const existingSkill = findInstalledSkill();
 
@@ -128,10 +225,14 @@ export async function runInstall(cli: CLIOptions): Promise<void> {
           const existingParentDir = cli.skillsDir || dirname(dirname(existingSkill));
           const result = installSkillFile(existingParentDir);
           ui.success(`SKILL.md updated at ${result.path}`);
+          results.push({ label: "SKILL.md", status: "pass", detail: "updated" });
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           ui.warn(`Could not update SKILL.md: ${msg}`);
+          results.push({ label: "SKILL.md", status: "warn", detail: "update failed" });
         }
+      } else {
+        results.push({ label: "SKILL.md", status: "pass", detail: "already installed" });
       }
     } else {
       const targetDir = cli.skillsDir || getDefaultSkillsDir();
@@ -149,22 +250,25 @@ export async function runInstall(cli: CLIOptions): Promise<void> {
         try {
           const result = installSkillFile(cli.skillsDir);
           ui.success(`SKILL.md installed at ${result.path}`);
+          results.push({ label: "SKILL.md", status: "pass", detail: result.path });
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           ui.warn(`Could not install SKILL.md: ${msg}`);
           ui.dimmed("You can try manually: npx arkitek-relay-skill --init-skill --skills-dir <path>");
+          results.push({ label: "SKILL.md", status: "warn", detail: "install failed" });
         }
       } else {
         ui.dimmed(
           "Skipped. Install later with: npx arkitek-relay-skill --init-skill",
         );
+        results.push({ label: "SKILL.md", status: "skip", detail: "user skipped" });
       }
     }
   }
 
-  // ── Step 4: ArkiTek API Key ──────────────────────────────────────
+  // ── Step 5: ArkiTek API Key ───────────────────────────────────
 
-  ui.step(4, TOTAL_STEPS, "ArkiTek API Key");
+  ui.step(5, TOTAL_STEPS, "ArkiTek API Key");
 
   let apiKey =
     cli.apiKey ||
@@ -190,6 +294,21 @@ export async function runInstall(cli: CLIOptions): Promise<void> {
     apiKey = await promptForApiKey();
   }
 
+  // Validate the key against ArkiTek's server
+  ui.info("Verifying API key with ArkiTek...");
+  const keyValid = await testApiKeyWithServer(apiKey, process.env.ARKITEK_RELAY_URL);
+
+  if (!keyValid) {
+    ui.error(`API key rejected by ArkiTek (${maskKey(apiKey)})`);
+    ui.dimmed("The server returned 401/403 — this key is invalid or revoked.");
+    ui.dimmed("Please check your key at https://arkitekai.com and try again.");
+    process.exit(1);
+  }
+
+  ui.success("API key verified with ArkiTek");
+  results.push({ label: "API Key", status: "pass", detail: maskKey(apiKey) });
+
+  // Clean up conflicting .env keys
   const envKeyLocations = findEnvKeyLocations();
   const envKeyValue = process.env.ARKITEK_API_KEY;
   const envHasDifferentKey = envKeyValue && envKeyValue !== apiKey;
@@ -254,30 +373,42 @@ export async function runInstall(cli: CLIOptions): Promise<void> {
     console.log();
   }
 
-  // ── Step 5: Test Gateway ─────────────────────────────────────────
+  // ── Step 6: Test Gateway ──────────────────────────────────────
 
-  ui.step(5, TOTAL_STEPS, "Testing gateway connection");
+  ui.step(6, TOTAL_STEPS, "Testing gateway connection");
 
   const gatewayReachable = await testGatewayReachable(gatewayUrl);
   if (gatewayReachable) {
     ui.success(`Gateway reachable at ${gatewayUrl}`);
+    results.push({ label: "Gateway", status: "pass", detail: gatewayUrl });
   } else {
     ui.warn(`Gateway not reachable at ${gatewayUrl}`);
     ui.dimmed(
       "The relay will start in echo mode until the gateway is available.",
     );
     ui.dimmed("Make sure OpenClaw is running: openclaw gateway start");
+    results.push({ label: "Gateway", status: "warn", detail: "not reachable" });
   }
 
-  // ── Step 6: Check /v1/responses ──────────────────────────────────
+  // ── Step 7: Check /v1/responses (REQUIRED) ────────────────────
 
-  ui.step(6, TOTAL_STEPS, "Checking /v1/responses endpoint");
+  ui.step(7, TOTAL_STEPS, "Checking /v1/responses endpoint (required)");
 
-  if (!gatewayReachable) {
-    ui.dimmed("Skipped (gateway not reachable)");
-  } else if (openclaw?.responsesEnabled) {
-    ui.success("/v1/responses endpoint is enabled (confirmed from config)");
-  } else {
+  ui.info(
+    "This endpoint is REQUIRED for the relay to forward messages to your",
+  );
+  ui.info(
+    "agent. The relay cannot function without it.",
+  );
+  console.log();
+
+  let responsesReady = false;
+
+  if (openclaw?.responsesEnabled) {
+    ui.success("/v1/responses endpoint is already enabled");
+    responsesReady = true;
+    results.push({ label: "/v1/responses", status: "pass" });
+  } else if (gatewayReachable) {
     const endpointStatus = await testResponsesEndpoint(
       gatewayUrl,
       gatewayToken,
@@ -285,49 +416,72 @@ export async function runInstall(cli: CLIOptions): Promise<void> {
 
     if (endpointStatus === "enabled") {
       ui.success("/v1/responses endpoint is enabled");
-    } else if (endpointStatus === "disabled") {
-      ui.warn("/v1/responses endpoint is disabled");
-      console.log();
-      ui.info(
-        "The relay needs this endpoint to forward messages to your agent.",
-      );
-
-      let shouldEnable = cli.yes;
-      if (!shouldEnable && process.stdin.isTTY) {
-        shouldEnable = await ui.confirm("Enable it now?");
+      responsesReady = true;
+      results.push({ label: "/v1/responses", status: "pass" });
+    } else {
+      if (endpointStatus === "disabled") {
+        ui.warn("/v1/responses endpoint is currently disabled.");
+      } else {
+        ui.warn("Could not determine endpoint status.");
       }
 
-      if (shouldEnable) {
-        const enabled = await enableResponsesEndpoint(
-          gatewayUrl,
-          gatewayToken,
+      ui.info("Setup needs to enable this endpoint in your OpenClaw config.");
+      console.log();
+
+      if (!cli.yes && process.stdin.isTTY) {
+        await ui.requireConfirm(
+          "Enable /v1/responses endpoint in OpenClaw config?",
         );
-        if (enabled) {
-          ui.success("/v1/responses endpoint enabled");
-        } else {
-          ui.error("Failed to enable endpoint automatically.");
-          ui.dimmed("Enable it manually:");
-          ui.dimmed(
-            "  openclaw gateway config.patch --set gateway.http.endpoints.responses.enabled=true",
-          );
-        }
+      }
+
+      const enabled = await enableResponsesEndpoint(gatewayUrl, gatewayToken);
+      if (enabled) {
+        ui.success("/v1/responses endpoint enabled");
+        responsesReady = true;
+        results.push({ label: "/v1/responses", status: "pass", detail: "enabled during setup" });
       } else {
-        ui.warn(
-          "Endpoint not enabled. The relay will not be able to forward messages.",
-        );
-        ui.dimmed("Enable manually later:");
+        ui.error("Failed to enable the endpoint automatically.");
+        console.log();
+        ui.error("You MUST enable it manually before the relay will work:");
         ui.dimmed(
           "  openclaw gateway config.patch --set gateway.http.endpoints.responses.enabled=true",
         );
+        results.push({ label: "/v1/responses", status: "fail", detail: "auto-enable failed" });
       }
+    }
+  } else {
+    // Gateway not reachable — can still patch the config file
+    ui.warn("Gateway is not reachable — cannot verify the endpoint live.");
+    ui.info("Setup will enable it in the OpenClaw config file so it's ready");
+    ui.info("when the gateway starts.");
+    console.log();
+
+    if (!cli.yes && process.stdin.isTTY) {
+      await ui.requireConfirm(
+        "Enable /v1/responses endpoint in OpenClaw config?",
+      );
+    }
+
+    const enabled = await enableResponsesEndpoint(gatewayUrl, gatewayToken);
+    if (enabled) {
+      ui.success("/v1/responses enabled in OpenClaw config");
+      ui.dimmed("The change will take effect when the gateway starts.");
+      responsesReady = true;
+      results.push({ label: "/v1/responses", status: "pass", detail: "enabled in config" });
     } else {
-      ui.dimmed("Could not determine endpoint status");
+      ui.error("Could not enable the endpoint automatically.");
+      console.log();
+      ui.error("You MUST enable it before the relay will work:");
+      ui.dimmed(
+        "  openclaw gateway config.patch --set gateway.http.endpoints.responses.enabled=true",
+      );
+      results.push({ label: "/v1/responses", status: "fail", detail: "config edit failed" });
     }
   }
 
-  // ── Step 7: Test ArkiTek Cloud ───────────────────────────────────
+  // ── Step 8: Test ArkiTek Cloud ────────────────────────────────
 
-  ui.step(7, TOTAL_STEPS, "Testing ArkiTek connection");
+  ui.step(8, TOTAL_STEPS, "Testing ArkiTek connection");
 
   let arkitekReachable = false;
   try {
@@ -342,17 +496,19 @@ export async function runInstall(cli: CLIOptions): Promise<void> {
 
   if (arkitekReachable) {
     ui.success("ArkiTek cloud is reachable");
+    results.push({ label: "ArkiTek Cloud", status: "pass" });
   } else {
     ui.warn("Could not reach ArkiTek cloud");
     ui.dimmed("Check your internet connection and firewall rules.");
     ui.dimmed(
       "Outbound HTTPS (port 443) to arkitekai.com must be allowed.",
     );
+    results.push({ label: "ArkiTek Cloud", status: "warn", detail: "not reachable" });
   }
 
-  // ── Step 8: Save Config ──────────────────────────────────────────
+  // ── Step 9: Save Config ───────────────────────────────────────
 
-  ui.step(8, TOTAL_STEPS, "Saving configuration");
+  ui.step(9, TOTAL_STEPS, "Saving configuration");
 
   const now = new Date().toISOString();
   const existing = readPersistedConfig();
@@ -370,10 +526,11 @@ export async function runInstall(cli: CLIOptions): Promise<void> {
   process.env.ARKITEK_API_KEY = apiKey;
 
   ui.success(`Configuration saved to ${getConfigDir()}/config.json`);
+  results.push({ label: "Config Saved", status: "pass" });
 
-  // ── Step 9: System Service ───────────────────────────────────────
+  // ── Step 10: System Service ───────────────────────────────────
 
-  ui.step(9, TOTAL_STEPS, "System service (auto-start on boot)");
+  ui.step(10, TOTAL_STEPS, "System service (auto-start on boot)");
 
   const existingService = await getServiceStatus();
   let serviceInstalled = existingService.installed;
@@ -415,12 +572,17 @@ export async function runInstall(cli: CLIOptions): Promise<void> {
     let shouldInstall = cli.yes;
     if (!shouldInstall && process.stdin.isTTY) {
       console.log();
-      ui.info(
-        "A system service starts the relay automatically on boot",
-      );
-      ui.info(
-        "and keeps it running in the background. No terminal needed.",
-      );
+      ui.info("With a system service (recommended):");
+      ui.dimmed("  \u2022 The relay runs 24/7 in the background automatically");
+      ui.dimmed("  \u2022 Starts on boot — no manual action needed");
+      ui.dimmed("  \u2022 Restarts automatically if it crashes");
+      ui.dimmed("  \u2022 No terminal window required");
+      console.log();
+      ui.info("Without a system service:");
+      ui.dimmed("  \u2022 You must manually run: npx arkitek-relay-skill");
+      ui.dimmed("  \u2022 The relay stops when you close the terminal");
+      ui.dimmed("  \u2022 You must restart it after every reboot");
+      ui.dimmed("  \u2022 Your agent is offline whenever the relay isn't running");
       console.log();
       shouldInstall = await ui.confirm(
         "Install as a system service?",
@@ -452,16 +614,64 @@ export async function runInstall(cli: CLIOptions): Promise<void> {
         );
       }
     } else {
+      console.log();
+      ui.warn("Service not installed. Your agent will be offline unless you manually start the relay.");
       ui.dimmed(
-        "Skipped. You can install it later with: npx arkitek-relay-skill --install",
+        "Start manually: npx arkitek-relay-skill",
+      );
+      ui.dimmed(
+        "Install the service later: npx arkitek-relay-skill --install",
       );
     }
   }
 
-  // ── Summary ──────────────────────────────────────────────────────
+  if (serviceInstalled) {
+    results.push({ label: "System Service", status: "pass" });
+  } else {
+    results.push({ label: "System Service", status: "skip", detail: "not installed" });
+  }
 
-  ui.heading("Setup Complete");
-  ui.success("Your relay is configured and ready.");
+  // ── Summary ───────────────────────────────────────────────────
+
+  ui.heading("Setup Summary");
+
+  const icons = { pass: "\u2714", warn: "\u26A0", fail: "\u2716", skip: "\u2013" };
+
+  for (const r of results) {
+    const icon = icons[r.status];
+    const detail = r.detail ? ` (${r.detail})` : "";
+    if (r.status === "pass") {
+      ui.success(`${r.label}${detail}`);
+    } else if (r.status === "warn") {
+      ui.warn(`${r.label}${detail}`);
+    } else if (r.status === "fail") {
+      ui.error(`${r.label}${detail}`);
+    } else {
+      ui.dimmed(`${icon} ${r.label}${detail}`);
+    }
+  }
+
+  const hasFailures = results.some((r) => r.status === "fail");
+  const hasWarnings = results.some((r) => r.status === "warn");
+
+  console.log();
+
+  if (hasFailures) {
+    ui.error("Setup completed with errors. Review the issues above before starting the relay.");
+    if (!responsesReady) {
+      console.log();
+      ui.error("CRITICAL: The /v1/responses endpoint is not enabled.");
+      ui.info("The relay will NOT function until you enable it:");
+      ui.dimmed(
+        "  openclaw gateway config.patch --set gateway.http.endpoints.responses.enabled=true",
+      );
+    }
+  } else if (hasWarnings) {
+    ui.warn("Setup completed with warnings. The relay may not work fully until the issues above are resolved.");
+  } else {
+    ui.success("All checks passed. Your relay is configured and ready.");
+  }
+
   console.log();
 
   if (serviceInstalled) {
