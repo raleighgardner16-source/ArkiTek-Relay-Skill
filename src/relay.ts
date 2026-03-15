@@ -214,8 +214,13 @@ export class RelayClient {
     log(`Connecting to ${url}...`);
 
     try {
-      const timeoutSignal = AbortSignal.timeout(CONNECT_TIMEOUT_MS);
-      const signal = AbortSignal.any([this.abortController.signal, timeoutSignal]);
+      // Timeout guards only the initial HTTP handshake — if the server
+      // doesn't respond within CONNECT_TIMEOUT_MS we abort. Once headers
+      // arrive we clear it so the SSE stream stays open indefinitely,
+      // guarded by the heartbeat monitor instead.
+      const connectTimer = setTimeout(() => {
+        this.abortController?.abort();
+      }, CONNECT_TIMEOUT_MS);
 
       const response = await fetch(url, {
         method: "GET",
@@ -224,8 +229,10 @@ export class RelayClient {
           Accept: "text/event-stream",
           "Cache-Control": "no-cache",
         },
-        signal,
+        signal: this.abortController.signal,
       });
+
+      clearTimeout(connectTimer);
 
       if (response.status === 401 || response.status === 403) {
         this.state = "auth_failed";
